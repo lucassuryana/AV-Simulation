@@ -31,8 +31,7 @@ from lib.moving_obstacles import MovingObstacleArterial
 from lib.moving_obstacles_prediction import MovingObstaclesPrediction
 from lib.mpc import MPC, MAX_ACCEL
 from lib.plotting import draw_car, draw_bicycle, draw_astar_search_points
-from lib.reasons_evaluation import evaluate_distance_to_centerline, evaluate_distance_to_obstacle, \
-    evaluate_time_following
+from lib.reasons_evaluation import evaluate_distance_to_centerline, evaluate_distance_to_obstacle, evaluate_time_following
 from lib.simulation import History, HistorySimulation, Simulation, State
 from lib.trajectories import calc_nearest_index_in_direction, resample_curve
 # In overtaking_cyclist_bidirectional_road.py
@@ -40,15 +39,10 @@ from lib.parameters import CyclistParameters, DriverParameters, ScenarioParamete
 
 # Initialize logging
 import logging
-
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-
-def main(weightofpolicy, weightofdriver, weightofcyclist, ideal_weight_cyclist, ideal_weight_driver,
-         ideal_weight_policymaker, xxx0, xxx1, xxx2, xxx3, yyy0, yyy1, yyy2, yyy3, zzz0, zzz1, zzz2, zzz3,
-         replanner: bool = False, vis_frame: bool = False, save_weight_table: bool = False,
-         historical_plot: bool = False, save_path=None) -> None:
+def main(weightofpolicy, weightofdriver, weightofcyclist, ideal_weight_cyclist, ideal_weight_driver, ideal_weight_policymaker, xxx0, xxx1, xxx2, xxx3, yyy0, yyy1, yyy2, yyy3, zzz0, zzz1, zzz2, zzz3, replanner: bool = False, vis_frame: bool = False, save_weight_table: bool = False, historical_plot: bool = False, save_path=None) -> None:
     """
     Main function to simulate the scenario of an AV overtaking a cyclist in a bidirectional road.
 
@@ -59,7 +53,7 @@ def main(weightofpolicy, weightofdriver, weightofcyclist, ideal_weight_cyclist, 
 
     # Initialization
     TIME_ELAPSED_DRIVER = 0  # time elapsed since the driver followed the bicycle at a distance less than DriverParameters.DISTANCE_REF
-    TIME_PASSED_CYCLIST = 0  # time elapsed since the driver followed the bicycle at a distance less than CyclistParameters.DISTANCE_REF
+    TIME_PASSED_CYCLIST = 0 # time elapsed since the driver followed the bicycle at a distance less than CyclistParameters.DISTANCE_REF
     IS_FOLLOWING = True  # Flag to determine if the driver will be following the vehicle in front
 
     # Lists to store simulation data
@@ -76,11 +70,11 @@ def main(weightofpolicy, weightofdriver, weightofcyclist, ideal_weight_cyclist, 
 
     # The save folder is now passed as an argument.
     # We no longer need to define it here using relative paths.
-
+    
     # Check if a save path was provided
     if save_path is None:
         raise ValueError("A save path must be provided to the main function.")
-
+    
     # Ensure the folder exists (create it if it doesn't)
     # This is handled in the run_simulation function, but it's good practice to have it here too
     save_path.mkdir(parents=True, exist_ok=True)
@@ -94,10 +88,7 @@ def main(weightofpolicy, weightofdriver, weightofcyclist, ideal_weight_cyclist, 
 
     # Run motion primitive search
     cost, path, trajectory_full, search_runtime = run_motion_primitive_search(scenario_no_obstacles, car_dimensions,
-                                                                              mps, xxx0=xxx0, xxx1=xxx1, xxx2=xxx2,
-                                                                              xxx3=xxx3, yyy0=yyy0, yyy1=yyy1,
-                                                                              yyy2=yyy2, yyy3=yyy3, zzz0=zzz0,
-                                                                              zzz1=zzz1, zzz2=zzz2, zzz3=zzz3)
+                                                                              mps,xxx0=xxx0, xxx1=xxx1, xxx2=xxx2, xxx3=xxx3, yyy0=yyy0, yyy1=yyy1, yyy2=yyy2, yyy3=yyy3, zzz0=zzz0, zzz1=zzz1, zzz2=zzz2, zzz3=zzz3)
 
     # Initialize MPC, set max speed to cyclist speed if the AV is following the cyclist
     if IS_FOLLOWING == True:
@@ -105,8 +96,7 @@ def main(weightofpolicy, weightofdriver, weightofcyclist, ideal_weight_cyclist, 
     else:
         mpc, state, dl = initialize_mpc(trajectory_full, car_dimensions, max_speed=MPCParameters.MAX_SPEED_FREEWAY)
 
-    simulation = HistorySimulation(car_dimensions=car_dimensions, sample_time=ScenarioParameters.DT,
-                                   initial_state=state)
+    simulation = HistorySimulation(car_dimensions=car_dimensions, sample_time=ScenarioParameters.DT, initial_state=state)
     history = simulation.history  # gets updated automatically as simulation runs
 
     # Number of index to cut off the trajectory before a collision occurs, change 2 for the larger index cut off
@@ -138,9 +128,8 @@ def main(weightofpolicy, weightofdriver, weightofcyclist, ideal_weight_cyclist, 
 
         # Predict the movement of each moving obstacle, and retrieve the predicted trajectories
         trajs_moving_obstacles = [
-            np.vstack(MovingObstaclesPrediction(*o.get(), sample_time=ScenarioParameters.DT,
-                                                car_dimensions=bicycle_dimensions)
-                      .state_prediction(MPCParameters.TIME_HORIZON)).T
+            np.vstack(MovingObstaclesPrediction(*o.get(), sample_time=ScenarioParameters.DT, car_dimensions=bicycle_dimensions)
+                     .state_prediction(MPCParameters.TIME_HORIZON)).T
             for o in moving_obstacles]
 
         # Evaluate reasons
@@ -159,8 +148,7 @@ def main(weightofpolicy, weightofdriver, weightofcyclist, ideal_weight_cyclist, 
 
             # Evaluate reasons and determine if a replan is needed, replan_tracker is used to prevent multiple replans
             replan_needed, replan_tracker = reasons_evaluation(reasons_cyclist_comfort, reasons_driver_time_eff,
-                                                               reasons_policymaker_reg_compliance, replan_needed,
-                                                               replan_tracker)
+                                                 reasons_policymaker_reg_compliance, replan_needed, replan_tracker)
 
             # Execute replan only if reasons value drop below ScenarioParameters.REASONS_THRESHOLD was detected
             if replan_needed:
@@ -168,21 +156,18 @@ def main(weightofpolicy, weightofdriver, weightofcyclist, ideal_weight_cyclist, 
                 IS_FOLLOWING = False
                 # change max_speed of the MPC to 30/3.6
                 collision_xy, mpc, traj_agent_idx, trajectory_full, scenario_obstacles = perform_replan(
-                    weightofpolicy, weightofdriver, weightofcyclist, ideal_weight_cyclist, ideal_weight_driver,
-                    ideal_weight_policymaker, arterial, car_dimensions, bicycle_dimensions, dl, moving_obstacles, mps,
-                    state,
-                    trajs_moving_obstacles, scenario_visualization,
-                    reasons_cyclist_comfort, reasons_driver_time_eff, reasons_policymaker_reg_compliance,
-                    reasons_cyclist_values, reasons_driver_values, reasons_policymaker_values,
-                    time_values, xxx0=xxx0, xxx1=xxx1, xxx2=xxx2, xxx3=xxx3, yyy0=yyy0, yyy1=yyy1, yyy2=yyy2, yyy3=yyy3,
-                    zzz0=zzz0, zzz1=zzz1, zzz2=zzz2, zzz3=zzz3,
-                    max_speed=MPCParameters.MAX_SPEED_FREEWAY,
-                    is_following=IS_FOLLOWING,
-                    vis_frame=vis_frame,
-                    save_weight_table=save_weight_table,
-                    time_elapsed_driver=TIME_ELAPSED_DRIVER,
-                    time_passed_cyclist=TIME_PASSED_CYCLIST
-                )
+                                 weightofpolicy, weightofdriver, weightofcyclist, ideal_weight_cyclist, ideal_weight_driver, ideal_weight_policymaker, arterial, car_dimensions, bicycle_dimensions, dl, moving_obstacles, mps, state,
+                                 trajs_moving_obstacles, scenario_visualization,
+                                 reasons_cyclist_comfort, reasons_driver_time_eff, reasons_policymaker_reg_compliance,
+                                 reasons_cyclist_values, reasons_driver_values, reasons_policymaker_values,
+                                 time_values, xxx0=xxx0, xxx1=xxx1, xxx2=xxx2, xxx3=xxx3, yyy0=yyy0, yyy1=yyy1, yyy2=yyy2, yyy3=yyy3, zzz0=zzz0, zzz1=zzz1, zzz2=zzz2, zzz3=zzz3,
+                                 max_speed=MPCParameters.MAX_SPEED_FREEWAY,
+                                 is_following=IS_FOLLOWING,
+                                 vis_frame=vis_frame,
+                                 save_weight_table=save_weight_table,
+                                 time_elapsed_driver=TIME_ELAPSED_DRIVER,
+                                 time_passed_cyclist=TIME_PASSED_CYCLIST
+                             )
                 scenario = scenario_obstacles
 
         # Cut off the trajectory before a collision occurs, with an additional margin
@@ -191,6 +176,7 @@ def main(weightofpolicy, weightofdriver, weightofcyclist, ideal_weight_cyclist, 
                                                                 trajectory_full)
         else:
             tmp_trajectory = trajectory_full
+
 
         # Pass the cut trajectory to the MPC
         mpc.set_trajectory_fromarray(tmp_trajectory)
@@ -206,14 +192,14 @@ def main(weightofpolicy, weightofdriver, weightofcyclist, ideal_weight_cyclist, 
         # show the computation results
         if vis_frame == True:
             # CRITICAL: Pass the save_path variable to visualize_frame()
-            visualize_frame(ScenarioParameters.DT, car_dimensions, bicycle_dimensions, collision_xy, i,
-                            moving_obstacles, mpc,
-                            scenario_visualization, simulation,
-                            state, tmp_trajectory, trajectory_res,
-                            reasons_cyclist_values, reasons_driver_values, reasons_policymaker_values, distance_values,
-                            reasons_cyclist_comfort, reasons_driver_time_eff, reasons_policymaker_reg_compliance,
-                            speed_values, time_values, xref_deviation_values, xref_deviation_value,
-                            static_x_axis=True, max_time=15, historical_plot=False, save_path=save_path)
+            visualize_frame(ScenarioParameters.DT, car_dimensions, bicycle_dimensions, collision_xy, i, moving_obstacles, mpc,
+                              scenario_visualization, simulation,
+                              state, tmp_trajectory, trajectory_res,
+                              reasons_cyclist_values, reasons_driver_values, reasons_policymaker_values, distance_values,
+                              reasons_cyclist_comfort, reasons_driver_time_eff, reasons_policymaker_reg_compliance,
+                              speed_values, time_values, xref_deviation_values, xref_deviation_value,
+                              static_x_axis=True, max_time=15, historical_plot=False, save_path=save_path)
+
 
         # Move all obstacles one step ahead
         for i_obs, o in enumerate(moving_obstacles):
@@ -290,6 +276,7 @@ def compute_predicted_trajectory(state, trajectory_res, last_index=None):
         return trajectory_res
 
 
+
 def update_trajectory_index(state, tmp_trajectory, traj_agent_idx, trajectory_full):
     """
     Update the trajectory index based on the current state.
@@ -310,15 +297,12 @@ def update_trajectory_index(state, tmp_trajectory, traj_agent_idx, trajectory_fu
     return traj_agent_idx
 
 
-def perform_replan(weightofpolicy, weightofdriver, weightofcyclist, ideal_weight_cyclist, ideal_weight_driver,
-                   ideal_weight_policymaker, arterial, car_dimensions, bicycle_dimensions, dl, moving_obstacles, mps,
-                   state,
+def perform_replan(weightofpolicy, weightofdriver, weightofcyclist, ideal_weight_cyclist, ideal_weight_driver, ideal_weight_policymaker, arterial, car_dimensions, bicycle_dimensions, dl, moving_obstacles, mps, state,
                    trajs_moving_obstacles, scenario_visualization,
                    reasons_cyclist_comfort, reasons_driver_time_eff, reasons_policymaker_reg_compliance,
                    reasons_cyclist_values, reasons_driver_values, reasons_policymaker_values,
                    time_values, max_speed, xxx0, xxx1, xxx2, xxx3, yyy0, yyy1, yyy2, yyy3, zzz0, zzz1, zzz2, zzz3,
-                   is_following=True, vis_frame=False, save_weight_table=False, time_elapsed_driver=0.0,
-                   time_passed_cyclist=0.0):
+                   is_following=True, vis_frame=False, save_weight_table=False, time_elapsed_driver=0.0, time_passed_cyclist=0.0):
     """
     Perform a replan based on the current state and moving obstacles.
 
@@ -353,13 +337,11 @@ def perform_replan(weightofpolicy, weightofdriver, weightofcyclist, ideal_weight
     logger.info(f"Initial position: {scenario_obstacles.start}")
 
     # Perform motion primitive search
-    search = MotionPrimitiveSearch(scenario_obstacles, car_dimensions, mps, xxx0=xxx0, xxx1=xxx1, xxx2=xxx2, xxx3=xxx3,
-                                   yyy0=yyy0, yyy1=yyy1, yyy2=yyy2, yyy3=yyy3, zzz0=zzz0, zzz1=zzz1, zzz2=zzz2,
-                                   zzz3=zzz3, margin=car_dimensions.radius,
+    search = MotionPrimitiveSearch(scenario_obstacles, car_dimensions, mps, xxx0=xxx0, xxx1=xxx1, xxx2=xxx2, xxx3=xxx3, yyy0=yyy0, yyy1=yyy1, yyy2=yyy2, yyy3=yyy3, zzz0=zzz0, zzz1=zzz1, zzz2=zzz2, zzz3=zzz3, margin=car_dimensions.radius,
                                    moving_obstacles_state=bicycle_state,
-                                   driver_elapsed_time=time_elapsed_driver,
-                                   cyclist_elapsed_time=time_passed_cyclist
-                                   )
+                                    driver_elapsed_time=time_elapsed_driver,
+                                    cyclist_elapsed_time=time_passed_cyclist
+                                )
 
     # Calculate all trajectories
     costs, paths, trajectories_full = search.run_all(debug=True)
@@ -368,7 +350,7 @@ def perform_replan(weightofpolicy, weightofdriver, weightofcyclist, ideal_weight
     follow_trajectory = create_following_trajectory(state, trajectories_full)
 
     # Add the trajectory to the list of trajectories to the last position
-    trajectories_full.append((follow_trajectory, (0.0, 0.0, 0.0, 0.0, 0.0)))
+    trajectories_full.append((follow_trajectory,(0.0, 0.0, 0.0, 0.0, 0.0)))
     print("YOYOYOYOYOYO", trajectories_full)
     print('''
 
@@ -403,8 +385,8 @@ def perform_replan(weightofpolicy, weightofdriver, weightofcyclist, ideal_weight
         weightofpolicy,
         weightofdriver,
         weightofcyclist,
-        ideal_weight_cyclist,
-        ideal_weight_driver,
+        ideal_weight_cyclist, 
+        ideal_weight_driver, 
         ideal_weight_policymaker,
         trajectories_full,
         moving_obstacles,
@@ -421,8 +403,7 @@ def perform_replan(weightofpolicy, weightofdriver, weightofcyclist, ideal_weight
     # In perform_replan after evaluation
     if vis_frame == True:
         visualize_trajectory_evaluations(
-            eval_results, trajectories_full, moving_obstacles, state, car_dimensions, bicycle_dimensions,
-            scenario_visualization, time_values,
+            eval_results, trajectories_full, moving_obstacles, state, car_dimensions, bicycle_dimensions, scenario_visualization, time_values,
             reasons_cyclist_values, reasons_driver_values, reasons_policymaker_values, agent_weights,
             save_path=os.path.join("results", "reasons_evaluation", "trajectory_evaluations.png")
         )
@@ -583,7 +564,7 @@ def visualize_trajectory_evaluations(eval_results, trajectories_full, moving_obs
         completion_time = eval_data['completion_time']
 
         # Set main title for each trajectory plot with clarified score meaning (higher position)
-        ax.set_title(f"Trajectory {i + 1}: Total Score $S(T_a)$ = {style_info['score']:.3f}",
+        ax.set_title(f"Trajectory {i+1}: Total Score $S(T_a)$ = {style_info['score']:.3f}",
                      fontsize=28, pad=40)  # Normal padding for title
 
         # Add trajectory description BELOW the title
@@ -788,8 +769,8 @@ def visualize_trajectory_evaluations(eval_results, trajectories_full, moving_obs
             color=color,
             linestyle=style,
             linewidth=width * 2,  # Make lines thicker for better visibility
-            # label=f"Traj {i}: {traj_description} (Score: {score:.3f})"  # Enhanced label
-            label=f"Trajectory {i + 1}"  # Enhanced label
+            #label=f"Traj {i}: {traj_description} (Score: {score:.3f})"  # Enhanced label
+            label=f"Trajectory {i+1}"  # Enhanced label
         )
 
     goal_x, goal_y = ScenarioParameters.X_LOC_GOAL, ScenarioParameters.Y_LOC_GOAL
@@ -826,6 +807,7 @@ def visualize_trajectory_evaluations(eval_results, trajectories_full, moving_obs
     # ax_spatial.set_yticklabels([])
     ax_spatial.tick_params(axis='both', which='major', labelsize=14)  # Set label size to 14
 
+
     # Trajectory legend - moved to upper left to avoid covering trajectories
     handles, labels = ax_spatial.get_legend_handles_labels()
     traj_nums = [int(label.split(':')[0].split(' ')[1]) for label in labels]
@@ -843,7 +825,6 @@ def visualize_trajectory_evaluations(eval_results, trajectories_full, moving_obs
     plt.show()
 
     return fig_trajectories, fig_spatial
-
 
 # def visualize_trajectory_evaluations(eval_results, trajectories_full, moving_obstacles, state, car_dimensions,
 #                                      bicycle_dimensions, scenario, time_values,
@@ -1213,7 +1194,6 @@ def get_priority_label(agent_weights):
     else:
         return "Mixed Priority"
 
-
 def format_weights(agent_weights):
     """
     Format agent weights as a concise string.
@@ -1278,10 +1258,7 @@ def balance_function(weights, ideal_weights=None):
     # Combine the two balance measures
     return distribution_balance * min_weight_ratio
 
-
-def evaluate_trajectories_for_reasons(weightofpolicy, weightofdriver, weightofcyclist, ideal_weight_cyclist,
-                                      ideal_weight_driver, ideal_weight_policymaker, trajectories_full,
-                                      moving_obstacles, state, car_dimensions, bicycle_dimensions,
+def evaluate_trajectories_for_reasons(weightofpolicy, weightofdriver, weightofcyclist, ideal_weight_cyclist, ideal_weight_driver, ideal_weight_policymaker, trajectories_full, moving_obstacles, state, car_dimensions, bicycle_dimensions,
                                       reasons_cyclist_comfort, reasons_driver_time_eff,
                                       reasons_policymaker_reg_compliance,
                                       time_elapsed_driver=0.0, time_passed_cyclist=0.0):
@@ -1306,7 +1283,7 @@ def evaluate_trajectories_for_reasons(weightofpolicy, weightofdriver, weightofcy
         # 1. Calculate time needed to complete this trajectory
         # For the last trajectory, we need to calculate resampled_trajectory differently
         if i == len(trajectories_full) - 1:
-            resampled_trajectory = compute_predicted_trajectory(state, trajectory[0], last_index=True)
+            resampled_trajectory = compute_predicted_trajectory(state, trajectory[0],last_index=True)
             # set completion time as the real completion time from other trajectories
             # completion_time = calculate_trajectory_completion_time(resampled_trajectory, state, last_index=True)
         else:
@@ -1391,12 +1368,12 @@ def evaluate_trajectories_for_reasons(weightofpolicy, weightofdriver, weightofcy
             cyclist_combined_score = cyclist_comfort_score * cyclist_time_score
             cyclist_combined_scores.append(cyclist_combined_score)
 
-        # delete last value of scores because the ego vehicle is not moving but the bicycle is
+        #delete last value of scores because the ego vehicle is not moving but the bicycle is
         policymaker_scores = policymaker_scores[:-1]
         driver_scores = driver_scores[:-1]
         cyclist_combined_scores = cyclist_combined_scores[:-1]
 
-        # replace first value of reasons scores with the first value of reasons evaluation
+        #replace first value of reasons scores with the first value of reasons evaluation
         policymaker_scores[0] = reasons_policymaker_reg_compliance
         driver_scores[0] = reasons_driver_time_eff
         cyclist_combined_scores[0] = reasons_cyclist_comfort
@@ -1417,12 +1394,10 @@ def evaluate_trajectories_for_reasons(weightofpolicy, weightofdriver, weightofcy
         print(f"Agent Weights: {agent_weights}")
 
         # Calculate balance function value
-        ideal_weights = [ideal_weight_cyclist, ideal_weight_driver,
-                         ideal_weight_policymaker]  # Cyclist, Driver, Policymaker
+        ideal_weights = [ideal_weight_cyclist, ideal_weight_driver, ideal_weight_policymaker]  # Cyclist, Driver, Policymaker
         # ideal_weights = [0.1, 0.1, 0.8]  # Cyclist, Driver, Policymaker -> more focus on policymaker
-        balance_value = balance_function(
-            [agent_weights.get('cyclist', 0), agent_weights.get('driver', 0), agent_weights.get('policymaker', 0)],
-            ideal_weights=ideal_weights)
+        balance_value = balance_function([agent_weights.get('cyclist', 0), agent_weights.get('driver', 0), agent_weights.get('policymaker', 0)],
+                                         ideal_weights=ideal_weights)
 
         total_score = balance_value * (
                 agent_weights['policymaker'] * avg_policymaker +
@@ -1847,7 +1822,7 @@ def evaluate_trajectories_with_weights(trajectories_full, moving_obstacles, stat
         }
         # ideal_weights = [0.44, 0.25, 0.31]  # Cyclist, Driver, Policymaker -> more focus on driver, based on interview results
         # ideal_weights = [0.1, 0.1, 0.8]  # Cyclist, Driver, Policymaker -> more focus on policymaker
-        ideal_weights = [1 / 3, 1 / 3, 1 / 3]  # Cyclist, Driver, Policymaker -> equal focus
+        ideal_weights = [1/3, 1/3, 1/3]  # Cyclist, Driver, Policymaker -> equal focus
 
         # Calculate balance function value - ensure it returns 1.0 for special cases
         balance_value = 1.0
@@ -1855,7 +1830,7 @@ def evaluate_trajectories_with_weights(trajectories_full, moving_obstacles, stat
             balance_value = balance_function([agent_weights.get('cyclist', 0),
                                               agent_weights.get('driver', 0),
                                               agent_weights.get('policymaker', 0)],
-                                             ideal_weights)
+                                              ideal_weights)
 
         total_score = balance_value * (
                 agent_weights['policymaker'] * avg_policymaker +
@@ -1956,7 +1931,6 @@ def calculate_trajectory_completion_time(trajectory_res, state, last_index=None)
 
     return total_time
 
-
 def reasons_evaluation(reasons_cyclist_comfort, reasons_driver_time_eff, reasons_policymaker_reg_compliance,
                        replan_needed, replan_tracker):
     """
@@ -1993,8 +1967,7 @@ def reasons_evaluation(reasons_cyclist_comfort, reasons_driver_time_eff, reasons
     return replan_needed, replan_tracker
 
 
-def run_motion_primitive_search(scenario_no_obstacles, car_dimensions, mps, xxx0, xxx1, xxx2, xxx3, yyy0, yyy1, yyy2,
-                                yyy3, zzz0, zzz1, zzz2, zzz3) -> tuple:
+def run_motion_primitive_search(scenario_no_obstacles, car_dimensions, mps, xxx0, xxx1, xxx2, xxx3, yyy0, yyy1, yyy2, yyy3, zzz0, zzz1, zzz2, zzz3) -> tuple:
     """
     Run the motion primitive search algorithm.
 
@@ -2007,9 +1980,7 @@ def run_motion_primitive_search(scenario_no_obstacles, car_dimensions, mps, xxx0
         tuple: A tuple containing the cost, path, and trajectory.
     """
     start_time = time.time()
-    search = MotionPrimitiveSearch(scenario_no_obstacles, car_dimensions, mps, xxx0=xxx0, xxx1=xxx1, xxx2=xxx2,
-                                   xxx3=xxx3, yyy0=yyy0, yyy1=yyy1, yyy2=yyy2, yyy3=yyy3, zzz0=zzz0, zzz1=zzz1,
-                                   zzz2=zzz2, zzz3=zzz3, margin=car_dimensions.radius)
+    search = MotionPrimitiveSearch(scenario_no_obstacles, car_dimensions, mps, xxx0=xxx0, xxx1=xxx1, xxx2=xxx2, xxx3=xxx3, yyy0=yyy0, yyy1=yyy1, yyy2=yyy2, yyy3=yyy3, zzz0=zzz0, zzz1=zzz1, zzz2=zzz2, zzz3=zzz3, margin=car_dimensions.radius)
     cost, path, trajectory_full = search.run(debug=True)
     logger.info("Search finished")
     plot_motion_primitives(search, scenario_no_obstacles, path, car_dimensions)
@@ -2017,7 +1988,6 @@ def run_motion_primitive_search(scenario_no_obstacles, car_dimensions, mps, xxx0
     search_runtime = end_time - start_time
     logger.info(f"Search runtime: {search_runtime}")
     return cost, path, trajectory_full, search_runtime
-
 
 def initialize_simulation() -> tuple:
     """
@@ -2040,12 +2010,10 @@ def initialize_simulation() -> tuple:
     spawn_location_x = scenario_no_obstacles.start[0] + ScenarioParameters.X_LOC_CYCLIST_BUFFER
     spawn_location_y = scenario_no_obstacles.start[1] + ScenarioParameters.Y_LOC_CYCLIST_BUFFER
     moving_obstacles = [
-        MovingObstacleArterial(bicycle_dimensions, spawn_location_x, spawn_location_y, speed=CyclistParameters.SPEED,
-                               initial_speed=CyclistParameters.SPEED, offset=True, dt=ScenarioParameters.DT)
+        MovingObstacleArterial(bicycle_dimensions, spawn_location_x, spawn_location_y, speed = CyclistParameters.SPEED, initial_speed = CyclistParameters.SPEED, offset=True, dt=ScenarioParameters.DT)
     ]
 
     return mps, car_dimensions, bicycle_dimensions, arterial, scenario_no_obstacles, scenario_visualization, moving_obstacles
-
 
 def initialize_mpc(trajectory_full, car_dimensions, max_speed) -> tuple:
     """
@@ -2059,12 +2027,9 @@ def initialize_mpc(trajectory_full, car_dimensions, max_speed) -> tuple:
         tuple: A tuple containing the MPC object, the initial state and the distance between the points in the trajectory.
     """
     dl = np.linalg.norm(trajectory_full[0, :2] - trajectory_full[1, :2])
-    mpc = MPC(cx=trajectory_full[:, 0], cy=trajectory_full[:, 1], cyaw=trajectory_full[:, 2], dl=dl,
-              dt=ScenarioParameters.DT, car_dimensions=car_dimensions, speed=max_speed)
-    state = State(x=trajectory_full[0, 0], y=trajectory_full[0, 1], yaw=trajectory_full[0, 2],
-                  v=CyclistParameters.SPEED)
+    mpc = MPC(cx=trajectory_full[:, 0], cy=trajectory_full[:, 1], cyaw=trajectory_full[:, 2], dl=dl, dt=ScenarioParameters.DT, car_dimensions=car_dimensions, speed=max_speed)
+    state = State(x=trajectory_full[0, 0], y=trajectory_full[0, 1], yaw=trajectory_full[0, 2], v=CyclistParameters.SPEED)
     return mpc, state, dl
-
 
 def evaluate_reasons(state, moving_obstacles, car_dimensions, TIME_ELAPSED_DRIVER, TIME_PASSED_CYCLIST) -> tuple:
     """
@@ -2081,24 +2046,12 @@ def evaluate_reasons(state, moving_obstacles, car_dimensions, TIME_ELAPSED_DRIVE
         tuple: A tuple containing the evaluated reasons and updated times.
     """
     car_width = car_dimensions.bounding_box_size[0]
-    reasons_policymaker_reg_compliance = evaluate_distance_to_centerline(state.x, car_width,
-                                                                         ScenarioParameters.CENTERLINE_LOCATION)
-    reasons_driver_time_eff, TIME_ELAPSED_DRIVER = evaluate_time_following('driver_reasons', ScenarioParameters.DT,
-                                                                           DriverParameters.DISTANCE_BUFFER,
-                                                                           DriverParameters.DISTANCE_REF,
-                                                                           DriverParameters.TIME_THRESHOLD,
-                                                                           moving_obstacles, state, TIME_ELAPSED_DRIVER)
-    reasons_cyclist_time_eff, TIME_PASSED_CYCLIST = evaluate_time_following('cyclist_reasons', ScenarioParameters.DT,
-                                                                            CyclistParameters.DISTANCE_BUFFER,
-                                                                            CyclistParameters.DISTANCE_REF,
-                                                                            CyclistParameters.TIME_THRESHOLD,
-                                                                            moving_obstacles, state,
-                                                                            TIME_PASSED_CYCLIST)
-    reasons_cyclist_distance = evaluate_distance_to_obstacle(CyclistParameters.DISTANCE_BUFFER,
-                                                             CyclistParameters.DISTANCE_REF, moving_obstacles, state)
+    reasons_policymaker_reg_compliance = evaluate_distance_to_centerline(state.x, car_width, ScenarioParameters.CENTERLINE_LOCATION)
+    reasons_driver_time_eff, TIME_ELAPSED_DRIVER = evaluate_time_following('driver_reasons', ScenarioParameters.DT, DriverParameters.DISTANCE_BUFFER, DriverParameters.DISTANCE_REF, DriverParameters.TIME_THRESHOLD, moving_obstacles, state, TIME_ELAPSED_DRIVER)
+    reasons_cyclist_time_eff, TIME_PASSED_CYCLIST = evaluate_time_following('cyclist_reasons', ScenarioParameters.DT, CyclistParameters.DISTANCE_BUFFER, CyclistParameters.DISTANCE_REF, CyclistParameters.TIME_THRESHOLD, moving_obstacles, state, TIME_PASSED_CYCLIST)
+    reasons_cyclist_distance = evaluate_distance_to_obstacle(CyclistParameters.DISTANCE_BUFFER, CyclistParameters.DISTANCE_REF, moving_obstacles, state)
     reasons_cyclist_comfort = reasons_cyclist_time_eff * reasons_cyclist_distance
     return reasons_policymaker_reg_compliance, reasons_driver_time_eff, reasons_cyclist_comfort, TIME_ELAPSED_DRIVER, TIME_PASSED_CYCLIST
-
 
 def plot_trajectories(obstacles_positions, ego_positions: History):
     # Create a new figure and get the current axes
@@ -2168,7 +2121,6 @@ def plot_trajectories(obstacles_positions, ego_positions: History):
     # Show the plot
     plt.show()
 
-
 def plot_motion_primitives(search, scenario, path, car_dimensions):
     fig, ax = plt.subplots()
     draw_astar_search_points(search, ax, visualize_heuristic=True, visualize_cost_to_come=False)
@@ -2210,8 +2162,7 @@ def plot_scenario_with_car(scenario, car_state, car_dimensions, ax):
     plt.grid(True)
     plt.show()
 
-
-def plot_deviation(ax, time_values, xref_deviation_value):
+def plot_deviation(ax,time_values,  xref_deviation_value):
     fontsize = 25
     ax.clear()
     ax.plot(time_values, xref_deviation_value, "-r", label="Deviation from reference trajectory")
@@ -2219,7 +2170,6 @@ def plot_deviation(ax, time_values, xref_deviation_value):
     ax.set_xlabel("Time [s]", fontsize=fontsize)
     ax.set_ylabel("Deviation [m]", fontsize=fontsize)
     ax.set_ylim(0, 0.035)  # Set the y-axis limit
-
 
 def visualize_final(history: History):
     fontsize = 25
@@ -2251,11 +2201,8 @@ def visualize_final(history: History):
     plt.tight_layout()
     plt.show()
 
-
 # Dictionary to store moving obstacle history
 obstacle_history = {}  # Key: obstacle, Value: list of (x, y, theta) over time
-
-
 def setup_plot(ax, tmp_trajectory, collision_xy, state, trajectory_res):
     """Set up the basic plot elements."""
     ax.set_facecolor('#AFABAB')
@@ -2276,7 +2223,7 @@ def draw_static_elements(ax, scenario):
     # Vertical lines
     ax.axvline(x=0 + 0.3, color='#FFBD00')
     ax.axvline(x=0 - 0.3, color='#FFBD00')
-    ax.axvline(x=ScenarioParameters.WIDTH_ROAD - 0.2, color='#FFFFFF')
+    ax.axvline(x=ScenarioParameters.WIDTH_ROAD -0.2, color='#FFFFFF')
     ax.axvline(x=ScenarioParameters.WIDTH_ROAD + 0.2, color='#FFFFFF')
 
 
@@ -2397,6 +2344,7 @@ def plot_car_and_obstacles(ax, tmp_trajectory, collision_xy, state, trajectory_r
     finalize_plot(ax, simulation, mpc, i, dt)
 
 
+
 def plot_reasons(ax, time_values, reasons_policymaker_values, reasons_driver_values, reasons_cyclist_values):
     # Plot reasons values over time
     # Define colors for better balance
@@ -2413,11 +2361,11 @@ def plot_reasons(ax, time_values, reasons_policymaker_values, reasons_driver_val
              linewidth=2);
     '''
     ax.plot(time_values, reasons_policymaker_values, label=r'Regulatory compliance', color=colors[0],
-            linestyle='--', linewidth=2)
+             linestyle='--', linewidth=2)
     ax.plot(time_values, reasons_driver_values, label=r"Driver's patience", color=colors[1], linestyle='--',
-            linewidth=2)
+             linewidth=2)
     ax.plot(time_values, reasons_cyclist_values, label=r"Cyclist's safety and comfort", color=colors[2], linestyle='--',
-            linewidth=2)
+             linewidth=2)
 
     ax.axhline(y=ReasonParameters.REASONS_THRESHOLD, color='red', linestyle=':', linewidth=2, label='Replan Threshold')
     # Annotate the threshold line
@@ -2432,7 +2380,6 @@ def plot_reasons(ax, time_values, reasons_policymaker_values, reasons_driver_val
     ax.set_ylim([0, 1.1])
     # ax.legend(fontsize=10, loc='lower left')
     ax.grid(False)
-
 
 def plot_velocity(ax, time_values, speed_values):
     # Plot reasons values over time
@@ -2452,7 +2399,6 @@ def plot_velocity(ax, time_values, speed_values):
 
     # Enable grid
     ax.grid(False)
-
 
 def plot_distance(ax, time_values, distance_values, DISTANCE_THRESHOLD_CAR, DISTANCE_THRESHOLD_BICYCLE):
     # Clear the axis for each new update
@@ -2477,8 +2423,7 @@ def plot_distance(ax, time_values, distance_values, DISTANCE_THRESHOLD_CAR, DIST
                     time_values[i],
                     color=threshold['color'],
                     linestyle='--',
-                    label=threshold['label'] if threshold['label'] not in [line.get_label() for line in
-                                                                           ax.get_lines()] else ''
+                    label=threshold['label'] if threshold['label'] not in [line.get_label() for line in ax.get_lines()] else ''
                 )
 
     # Set axis labels and title
@@ -2492,14 +2437,11 @@ def plot_distance(ax, time_values, distance_values, DISTANCE_THRESHOLD_CAR, DIST
     # Enable grid
     ax.grid(True)
 
-
 def visualize_frame(dt, car_dimensions, bicycle_dimensions, collision_xy, i, moving_obstacles, mpc,
                     scenario, simulation, state, tmp_trajectory, trajectory_res,
                     reasons_cyclist_values, reasons_driver_values, reasons_policymaker_values, distance_values,
-                    reasons_cyclist_comfort, reasons_driver_time_eff, reasons_policymaker_reg_compliance, speed_values,
-                    time_values, xref_deviation_values, xref_deviation_value,
-                    static_x_axis=True, max_time=20, save_path=None,
-                    historical_plot=False):  # ADDED: save_path parameter
+                    reasons_cyclist_comfort, reasons_driver_time_eff, reasons_policymaker_reg_compliance, speed_values, time_values,  xref_deviation_values, xref_deviation_value,
+                    static_x_axis=True, max_time=20, save_path=None, historical_plot=False): # ADDED: save_path parameter
     """
     Visualize the simulation frame with an option for static or dynamic x-axis.
 
@@ -2525,8 +2467,7 @@ def visualize_frame(dt, car_dimensions, bicycle_dimensions, collision_xy, i, mov
 
         # Update ax1 with the car, obstacles, and other related information
         plot_car_and_obstacles(ax1, tmp_trajectory, collision_xy, state, trajectory_res, scenario, moving_obstacles,
-                               simulation, mpc, car_dimensions, bicycle_dimensions, i, dt,
-                               historical_plot=historical_plot)
+                               simulation, mpc, car_dimensions, bicycle_dimensions, i, dt, historical_plot=historical_plot)
 
         # Update ax2 with reasons values over time
         time_value = i * dt  # Time value for current simulation step
@@ -2534,7 +2475,7 @@ def visualize_frame(dt, car_dimensions, bicycle_dimensions, collision_xy, i, mov
         reasons_policymaker_values.append(reasons_policymaker_reg_compliance)
         reasons_driver_values.append(reasons_driver_time_eff)
         reasons_cyclist_values.append(reasons_cyclist_comfort)
-        speed_values.append(state.v * 3.6)  # times 3.6 to convert from m/s to km/h
+        speed_values.append(state.v * 3.6) # times 3.6 to convert from m/s to km/h
         distance_values.append(np.linalg.norm(
             [moving_obstacles[0].get()[0] - state.x,
              moving_obstacles[0].get()[1] - state.y]))  # Placeholder for distance values
@@ -2569,9 +2510,7 @@ def visualize_frame(dt, car_dimensions, bicycle_dimensions, collision_xy, i, mov
         # plt.pause(0.001)
         plt.close()
 
-
-def save_vehicle_data(simulation, time_values, reasons_policymaker_values, reasons_driver_values,
-                      reasons_cyclist_values, supervision):
+def save_vehicle_data(simulation, time_values, reasons_policymaker_values, reasons_driver_values, reasons_cyclist_values, supervision):
     """
     Save vehicle data to a CSV file.
     """
@@ -2593,12 +2532,8 @@ def save_vehicle_data(simulation, time_values, reasons_policymaker_values, reaso
 
     with open(save_path, mode='w', newline='') as file:
         writer = csv.writer(file)
-        writer.writerow(
-            ['time', 'acceleration', 'v', 'x', 'y', 'yaw', 'x_ref_dev', 'reasons_policymaker', 'reasons_driver',
-             'reasons_cyclist'])
-        for row in zip(time_simulation, acceleration_vehicle, velocity_vehicle, x_position_vehicle, y_position_vehicle,
-                       yaw_vehicle, x_ref_deviation_vehicle, reasons_policymaker_values, reasons_driver_values,
-                       reasons_cyclist_values):
+        writer.writerow(['time', 'acceleration', 'v', 'x', 'y', 'yaw', 'x_ref_dev', 'reasons_policymaker', 'reasons_driver', 'reasons_cyclist'])
+        for row in zip(time_simulation, acceleration_vehicle, velocity_vehicle, x_position_vehicle, y_position_vehicle, yaw_vehicle, x_ref_deviation_vehicle, reasons_policymaker_values, reasons_driver_values, reasons_cyclist_values):
             writer.writerow(row)
     logger.info("Vehicle data saved")
 
@@ -2613,7 +2548,6 @@ from dataclasses import dataclass
 
 # Path to the parameters file
 PARAMETERS_PATH = Path(__file__).resolve().parent.parent / "lib" / "parameters.py"
-
 
 def update_parameters_file(params):
     """
@@ -2660,13 +2594,10 @@ class CyclistParameters:
 """
     with open(PARAMETERS_PATH, "w") as f:
         f.write(file_content)
-
-
-def run_simulation(weightofpolicy, weightofdriver, weightofcyclist, ideal_weight_cyclist, ideal_weight_driver,
-                   ideal_weight_policymaker, xxx0, xxx1, xxx2, xxx3, yyy0, yyy1, yyy2, yyy3, zzz0, zzz1, zzz2, zzz3):
+def run_simulation(weightofpolicy, weightofdriver, weightofcyclist, ideal_weight_cyclist, ideal_weight_driver, ideal_weight_policymaker, xxx0, xxx1, xxx2, xxx3, yyy0, yyy1, yyy2, yyy3, zzz0, zzz1, zzz2, zzz3):
     # Use pathlib to get the directory of the current file
     script_dir = Path(__file__).parent
-
+    
     # Correctly go up TWO levels to the root of the repo
     grandparent_dir = script_dir.parent.parent
     results_folder = grandparent_dir / "results" / "reasons_evaluation"
@@ -2674,7 +2605,7 @@ def run_simulation(weightofpolicy, weightofdriver, weightofcyclist, ideal_weight
     # --- THIS LINE IS CRITICAL ---
     # Create the results directory if it does not exist
     results_folder.mkdir(parents=True, exist_ok=True)
-
+    
     st.info(f"Using results directory: {results_folder}")
 
     # --- Fix for the main() function's missing path handling ---
@@ -2683,18 +2614,16 @@ def run_simulation(weightofpolicy, weightofdriver, weightofcyclist, ideal_weight
     # If your main() function accepts a path, pass results_folder to it.
     # e.g., main(..., save_path=results_folder)
     # If not, you must fix the code inside main() to use this folder.
-
+    
     # Run the simulation
-    main(weightofpolicy, weightofdriver, weightofcyclist, ideal_weight_cyclist, ideal_weight_driver,
-         ideal_weight_policymaker, xxx0, xxx1, xxx2, xxx3, yyy0, yyy1, yyy2, yyy3, zzz0, zzz1, zzz2, zzz3,
-         replanner=True, vis_frame=True, save_weight_table=False, historical_plot=False, save_path=results_folder)
-
+    main(weightofpolicy, weightofdriver, weightofcyclist, ideal_weight_cyclist, ideal_weight_driver, ideal_weight_policymaker, xxx0, xxx1, xxx2, xxx3, yyy0, yyy1, yyy2, yyy3, zzz0, zzz1, zzz2, zzz3, replanner=True, vis_frame=True, save_weight_table=False, historical_plot=False, save_path=results_folder)
+    
     # --- START OF DIAGNOSTIC BLOCK ---
     st.info("Checking for generated frames...")
     try:
         files_in_dir = os.listdir(results_folder)
         frames_found = [f for f in files_in_dir if f.startswith('frame_')]
-
+        
         if not frames_found:
             st.error(f"FAILURE: No files starting with 'frame_' were found in: {results_folder}")
             st.info(f"Files found in directory: {files_in_dir}")
@@ -2706,6 +2635,7 @@ def run_simulation(weightofpolicy, weightofdriver, weightofcyclist, ideal_weight
             output_video_path = results_folder / "output_video.mp4"
             trajectory_evaluation_spatial = results_folder / "trajectory_evaluations_spatial.png"
             trajectory_evaluations_trajectories = results_folder / "trajectory_evaluations_trajectories.png"
+            
 
             subprocess.run([
                 'ffmpeg', '-y', '-framerate', '10', '-i', str(input_images_path),
@@ -2715,27 +2645,26 @@ def run_simulation(weightofpolicy, weightofdriver, weightofcyclist, ideal_weight
             # Display the video in Streamlit
             st.subheader("⚙ Results ")
             if output_video_path.exists():
-
+                
                 # 1. Create three columns with equal width (1, 1, 1)
                 col1, col2, col3 = st.columns(3)
-
+                
                 # --- Column 1: Spatial Trajectory Evaluation ---
                 with col1:
                     st.subheader("1. Generated Trajectories from Step 1")
                     # Use st.image for the figure
                     st.image(str(trajectory_evaluation_spatial), caption="Spatial Trajectory Evaluation")
-
+                    
                 # --- Column 2: Trajectory Evaluation Results ---
                 with col2:
                     st.subheader("2. Evaluation Results of Three Trajectories from Step 2")
                     # Use st.image for the figure
                     st.image(str(trajectory_evaluations_trajectories), caption="Trajectory Evaluation")
-
+                    
                 # --- Column 3: Output Video ---
                 with col3:
                     st.subheader("3. AV Decision Video")
-                    st.write(
-                        "A video showing how the AV makes decisions that respect human reasons according to the weights you set")
+                    st.write("A video showing how the AV makes decisions that respect human reasons according to the weights you set")
                     # Use st.video for the video
                     st.video(str(output_video_path))
 
@@ -2753,7 +2682,7 @@ def run_simulation(weightofpolicy, weightofdriver, weightofcyclist, ideal_weight
 
 script_dir = Path(__file__).parent
 grandparent_dir = script_dir.parent.parent
-d_results_folder = grandparent_dir / "results"
+d_results_folder = grandparent_dir / "results" 
 d_output_video_path = d_results_folder / "d_output_video.mp4"
 print(d_output_video_path)
 d_trajectory_evaluation_spatial = d_results_folder / "d_trajectory_evaluations_spatial.png"
@@ -2917,12 +2846,11 @@ st.markdown("""
 * Weights: Policymaker 0%, Cyclist 50%, Driver 50%.
 """)
 
-st.markdown("---")  # Creates the horizontal line
+st.markdown("---") # Creates the horizontal line
 
 st.markdown("### ⚙️ Step 1: Generate Possible Paths")
 
-st.write(
-    "We use an algorithm that creates possible trajectories. It does this by giving weights to different human reasons considerations, such as rules, safety, and efficiency.")
+st.write("We use an algorithm that creates possible trajectories. It does this by giving weights to different human reasons considerations, such as rules, safety, and efficiency.")
 
 st.markdown("""
 * T1 is fixed as the conservative baseline (100% policy).
@@ -2940,6 +2868,8 @@ st.markdown("""
 
 st.markdown("👉 **Try it out:** Adjust the sliders to see how your chosen weights generate different overtaking paths.")
 
+
+
 import streamlit as st
 import numpy as np
 import pandas as pd
@@ -2952,16 +2882,16 @@ st.set_page_config(page_title="Weight Trajectory Simulator")
 
 # Define colors and emojis
 COLOR_POLICY = "#4CAF50"  # Green ⚖️
-EMOJI_POLICY = "⚖️"
-COLOR_TIME = "#2196F3"  # Blue ⏱️
-EMOJI_TIME = "⏱️"
+EMOJI_POLICY = "⚖️" 
+COLOR_TIME = "#2196F3"    # Blue ⏱️
+EMOJI_TIME = "⏱️" 
 COLOR_SAFETY = "#F44336"  # Red 🚴
-EMOJI_SAFETY = "🚴"
+EMOJI_SAFETY = "🚴" 
 
 # Map for Altair (Not strictly needed here, but kept for consistency)
 COLOR_MAP = {
-    f"{EMOJI_POLICY} Policy": COLOR_POLICY,
-    f"{EMOJI_TIME} Time Efficiency": COLOR_TIME,
+    f"{EMOJI_POLICY} Policy": COLOR_POLICY, 
+    f"{EMOJI_TIME} Time Efficiency": COLOR_TIME, 
     f"{EMOJI_SAFETY} Cyclist Safety": COLOR_SAFETY
 }
 
@@ -2976,13 +2906,13 @@ def set_slider_colors(key, color, value):
         /* Target the specific slider's track based on key */
         div[data-testid*="{key}"] div.stSlider > div[data-baseweb = "slider"] > div > div {{
             background: linear-gradient(to right, {color} 0%,  
-                                                {color} {value * 100}%, 
-                                                rgba(151, 166, 195, 0.25) {value * 100}%, 
+                                                {color} {value*100}%, 
+                                                rgba(151, 166, 195, 0.25) {value*100}%, 
                                                 rgba(151, 166, 195, 0.25) 100%) !important;
         }} 
     </style>'''
     st.markdown(track_css, unsafe_allow_html=True)
-
+    
     # 2. Slider Cursor Color
     cursor_css = f'''
     <style> 
@@ -2994,7 +2924,7 @@ def set_slider_colors(key, color, value):
         }} 
     </style>'''
     st.markdown(cursor_css, unsafe_allow_html=True)
-
+    
     # 3. Fix for the slider's background color on the left side (if it's white/light)
     fill_css = f'''
     <style>
@@ -3011,24 +2941,24 @@ def stacked_weight_bar_native(xxx, yyy, zzz, is_valid):
     """
     Creates a single, thick, stacked bar using native Streamlit (Altair).
     """
-
+    
     # 1. Prepare data
     data = pd.DataFrame({
         'Category': [f"{EMOJI_POLICY} Policy", f"{EMOJI_TIME} Time Efficiency", f"{EMOJI_SAFETY} Cyclist Safety"],
         'Weight': [xxx, yyy, zzz],
     })
-
+    
     # 2. Determine Opacity/Color for "Grey Out"
     opacity_color_map = {
         f"{EMOJI_POLICY} Policy": COLOR_POLICY if is_valid else "#808080",
         f"{EMOJI_TIME} Time Efficiency": COLOR_TIME if is_valid else "#808080",
         f"{EMOJI_SAFETY} Cyclist Safety": COLOR_SAFETY if is_valid else "#808080"
     }
-
+    
     # --- Background Bar (Full Width) ---
     background_bar = alt.Chart(pd.DataFrame({'x': [0], 'y': [1]})).mark_bar(
-        color='#333333',
-        height=60
+        color='#333333', 
+        height=60 
     ).encode(
         x=alt.X('x', scale=alt.Scale(domain=[0, 1]), axis=None),
         x2='y',
@@ -3039,81 +2969,80 @@ def stacked_weight_bar_native(xxx, yyy, zzz, is_valid):
 
     # --- Actual Stacked Bar (Foreground) ---
     stacked_chart = alt.Chart(data).mark_bar(height=60).encode(
-        x=alt.X('Weight', axis=None, stack="normalize"),
-        y=alt.Y('constant:N', title=None, axis=None),
-
-        color=alt.Color('Category',
-                        scale=alt.Scale(domain=list(opacity_color_map.keys()),
+        x=alt.X('Weight', axis=None, stack="normalize"), 
+        y=alt.Y('constant:N', title=None, axis=None), 
+        
+        color=alt.Color('Category', 
+                        scale=alt.Scale(domain=list(opacity_color_map.keys()), 
                                         range=list(opacity_color_map.values())),
-                        legend=alt.Legend(title="Weights",
-                                          orient="bottom",
+                        legend=alt.Legend(title="Weights", 
+                                          orient="bottom", 
                                           columns=3,
                                           labelFontSize=14,
-                                          titlePadding=0,
+                                          titlePadding=0, 
                                           titleOrient='top')),
         tooltip=['Category', alt.Tooltip('Weight', format='.1%')]
     ).properties(
         width='container'
     )
-
+    
     # Combine charts and set total height
     final_chart = alt.layer(background_bar, stacked_chart).resolve_scale(
-        y='independent'
-    ).properties(height=100)
-
+        y='independent' 
+    ).properties(height=100) 
+    
     st.altair_chart(final_chart, use_container_width=True)
 
 
 # --- Main Slider Function (Updated to check for run button control) ---
 def create_weight_sliders(
-        full_title,
-        initial_xxx,
-        initial_yyy,
-        initial_zzz,
-        preset_policy_label,
-        preset_driver_label,
-        preset_cyclist_label,
-        key_suffix="standard",  # New parameter for key suffix
-        button_placeholder=None,  # New parameter to pass the button container
+    full_title,
+    initial_xxx, 
+    initial_yyy, 
+    initial_zzz, 
+    preset_policy_label,
+    preset_driver_label,
+    preset_cyclist_label,
+    key_suffix="standard", # New parameter for key suffix
+    button_placeholder=None, # New parameter to pass the button container
 ):
     """
     Creates the sliders, validation, stacked animated bar, and controls the run button state.
-
-    Returns:
+    
+    Returns: 
         (xxx, yyy, zzz, is_valid)
     """
-
+    
     # Ensure a unique key prefix based on the suffix
     key_prefix = key_suffix.replace(" ", "_").replace(":", "_")
-
+    
     with st.container():
-        st.subheader(full_title)
-
+        st.subheader(full_title) 
+        
         # Only show preset weights if they are provided
         if preset_policy_label is not None:
-            st.write(
-                f"**Preset Weights**: Policy: {preset_policy_label}%, Time: {preset_driver_label}%, Safety: {preset_cyclist_label}%")
+             st.write(f"**Preset Weights**: Policy: {preset_policy_label}%, Time: {preset_driver_label}%, Safety: {preset_cyclist_label}%")
 
         col1, col2 = st.columns([1, 1])
-
+        
         with col1:
             st.markdown(
                 f"Set your weights below:"
             )
-
-            # Policy Slider (yyy)
+            
+            # Policy Slider (yyy) 
             policy_key = f"{key_prefix}_policy"
             xxx = st.slider(
-                f"{EMOJI_POLICY} Policy",
-                min_value=0.0,
-                max_value=1.0,
-                value=initial_yyy,
-                step=0.01,
+                f"{EMOJI_POLICY} Policy", 
+                min_value=0.0, 
+                max_value=1.0, 
+                value=initial_yyy, 
+                step=0.01, 
                 key=policy_key
             )
             set_slider_colors(policy_key, COLOR_POLICY, xxx)
-
-            # Time Efficiency Slider (xxx)
+            
+            # Time Efficiency Slider (xxx) 
             driver_key = f"{key_prefix}_driver"
             yyy = st.slider(
                 f"{EMOJI_TIME} Time Efficiency",
@@ -3124,8 +3053,8 @@ def create_weight_sliders(
                 key=driver_key
             )
             set_slider_colors(driver_key, COLOR_TIME, yyy)
-
-            # Cyclist Safety Slider (zzz)
+            
+            # Cyclist Safety Slider (zzz) 
             cyclist_key = f"{key_prefix}_cyclist"
             zzz = st.slider(
                 f"{EMOJI_SAFETY} Cyclist Safety",
@@ -3136,19 +3065,19 @@ def create_weight_sliders(
                 key=cyclist_key
             )
             set_slider_colors(cyclist_key, COLOR_SAFETY, zzz)
-
+            
         total_sum = xxx + yyy + zzz
         is_valid = np.isclose(total_sum, 1.0)
 
         with col2:
             st.markdown("### Current Weight Distribution")
-
+            
             # Force a break line for separation
             st.markdown("<br>", unsafe_allow_html=True)
-
+            
             # Display the Stacked Bar using native Altair
             stacked_weight_bar_native(xxx, yyy, zzz, is_valid)
-
+            
             # Display the validation message
             if not is_valid:
                 st.error("The weights must sum to 1.0 (currently sum to: {:.2f})".format(total_sum))
@@ -3163,7 +3092,6 @@ def create_weight_sliders(
 
     return xxx, yyy, zzz, is_valid
 
-
 # =========================================================================
 # --- MAIN APPLICATION LAYOUT ---
 # =========================================================================
@@ -3176,17 +3104,16 @@ xxx0, yyy0, zzz0, is_evaluator_valid0 = create_weight_sliders("Trajectory 1", 0.
 st.divider()
 xxx1, yyy1, zzz1, is_evaluator_valid1 = create_weight_sliders("Trajectory 2", 0.5, 0.0, 0.5, 0, 50, 50, key_suffix="T3")
 st.divider()
-xxx2, yyy2, zzz2, is_evaluator_valid2 = create_weight_sliders("Trajectory 3", 0.0, 0.5, 0.5, 40, 40, 20,
-                                                              key_suffix="T4")
+xxx2, yyy2, zzz2, is_evaluator_valid2 = create_weight_sliders("Trajectory 3", 0.0, 0.5, 0.5, 40, 40, 20, key_suffix="T4")
 st.divider()
 xxx3, yyy3, zzz3, is_evaluator_valid3 = create_weight_sliders("Trajectory 4", 1.0, 0.0, 0.0, 100, 0, 0, key_suffix="T1")
 st.divider()
 
+
 # --- Section 2: Set Your Own Weights (The new set) ---
 st.markdown("### ⚖️ Step 2: Choose Evaluator Weights")
 
-st.write(
-    "After generating the possible trajectories, we now **evaluate which one best matches the evaluator weights you set**.")
+st.write("After generating the possible trajectories, we now **evaluate which one best matches the evaluator weights you set**.")
 
 st.write("Use the sliders to decide how much priority to give to each reason:")
 
@@ -3196,26 +3123,25 @@ st.markdown("""
 * 🚲 Cyclist (safety)
 """)
 
-st.write(
-    "For example, if you set 40% for policymaker, 30% for driver, and 30% for cyclist, the system will choose the path that is **most aligned** with that mix.")
+st.write("For example, if you set 40% for policymaker, 30% for driver, and 30% for cyclist, the system will choose the path that is **most aligned** with that mix.")
 
-st.markdown(
-    "👉 **Try it out:** Adjust the weights according to your own preferences and see which trajectory gets selected.")
+st.markdown("👉 **Try it out:** Adjust the weights according to your own preferences and see which trajectory gets selected.")
 
 # This set needs to return its validity flag to control the button
 # Use a distinct key_suffix for this set: "evaluator"
 weight_policy, weight_driver, weight_cyclist, is_evaluator_valid = create_weight_sliders(
     full_title="Set your own weights",
-    initial_xxx=0.33,
-    initial_yyy=0.33,
-    initial_zzz=0.34,
-    preset_policy_label=None,  # Set to None to hide the preset line
+    initial_xxx=0.33, 
+    initial_yyy=0.33, 
+    initial_zzz=0.34, 
+    preset_policy_label=None, # Set to None to hide the preset line
     preset_driver_label=None,
     preset_cyclist_label=None,
     key_suffix="evaluator"
 )
 
 st.divider()
+
 
 # --- Section 3: Commit and Run the Simulation (The Button) ---
 
@@ -3224,22 +3150,21 @@ button_container = st.container()
 
 st.markdown("### ▶️ Step 3: Commit and Run the Simulation")
 
-st.write(
-    "When you click **Run Simulation**, the algorithm generates three trajectories based on the weights you set. It then identifies the trajectory that best matches those weights. A model predictive control (MPC) module is used to track the selected trajectory.")
+st.write("When you click **Run Simulation**, the algorithm generates three trajectories based on the weights you set. It then identifies the trajectory that best matches those weights. A model predictive control (MPC) module is used to track the selected trajectory.")
 
 st.write("The output is a video showing how the AV makes decisions that reflect your chosen priorities.")
 
 st.markdown("👉 **Try it out:** Run the simulation and watch how your chosen priorities shape the AV's behavior.")
 
-# Place the button inside the designated container.
+# Place the button inside the designated container. 
 # The disabled state is controlled by the logic below.
 # with button_container:
 #     # Use the validity flag from the 'Set your own weights' section to disable the button.
 #     # The button is ONLY enabled if the user-defined weights sum to 1.0.
 #     st.button(
-#         "Run Simulation",
-#         disabled=not is_evaluator_valid,
-#         type="primary",
+#         "Run Simulation", 
+#         disabled=not is_evaluator_valid, 
+#         type="primary", 
 #         key="main_run_button"
 #     )
 
@@ -3257,7 +3182,7 @@ with st.expander("Expand to edit simulation parameters"):
     scenario_x_loc_ego = st.number_input("X_LOC_EGO", value=2.0, step=0.1)
     scenario_x_loc_cyclist_buffer = st.number_input("X_LOC_CYCLIST_BUFFER", value=1.6, step=0.1)
     scenario_y_loc_cyclist_buffer = st.number_input("Y_LOC_CYCLIST_BUFFER", value=9.7, step=0.1)
-
+    
     st.markdown("---")
 
     # ReasonParameters
@@ -3291,21 +3216,21 @@ with st.expander("Expand to edit simulation parameters"):
         st.subheader("ideal weight set")
         ideal_weight_cyclist = st.slider("ideal_weight_cyclist", min_value=0.0, max_value=1.0, value=0.33, step=0.01)
         ideal_weight_driver = st.slider("ideal_weight_driver", min_value=0.0, max_value=1.0, value=0.33, step=0.01)
-        ideal_weight_policymaker = st.slider("ideal_weight_policymaker", min_value=0.0, max_value=1.0, value=0.34,
-                                             step=0.01)
+        ideal_weight_policymaker = st.slider("ideal_weight_policymaker", min_value=0.0, max_value=1.0, value=0.34, step=0.01)
+
+
 
 # st.button(
-#         "Run Simulation",
-#         disabled=not is_evaluator_valid,
-#         type="primary",
+#         "Run Simulation", 
+#         disabled=not is_evaluator_valid, 
+#         type="primary", 
 #         key="main_run_button"
 #     )
 if st.button("Run Simulation",
-             disabled=not (
-                     is_evaluator_valid and is_evaluator_valid0 and is_evaluator_valid1 and is_evaluator_valid2 and is_evaluator_valid3),
-             type="primary"):
+            disabled=not (is_evaluator_valid and is_evaluator_valid0 and is_evaluator_valid1 and is_evaluator_valid2 and is_evaluator_valid3),
+            type="primary"):
     st.info("Running simulation...")
-
+    
     # Replace the video with an embedded Dino game clone
     dino_html = """
     <iframe src="https://chromedino.com/" 
@@ -3314,27 +3239,26 @@ if st.button("Run Simulation",
     </iframe>
     """
     with st.expander("See Default Outputs"):
-
+        
         # Create three columns with equal width (1, 1, 1) inside the expander
         col1, col2, col3 = st.columns(3)
-
+        
         # --- Column 1: Spatial Trajectory Evaluation ---
         with col1:
             st.subheader("1. Generated Trajectories from Step 1")
             # Display the spatial image
             st.image(str(spatial_image_path), caption="Spatial Trajectory Evaluation")
-
+            
         # --- Column 2: Trajectory Evaluation Results ---
         with col2:
             st.subheader("2. Evaluation Results of Three Trajectories from Step 2")
             # Display the trajectory image
             st.image(str(trajectory_image_path), caption="Trajectory Evaluation")
-
+            
         # --- Column 3: Output Video ---
         with col3:
             st.subheader("3. AV Decision Video")
-            st.write(
-                "A video showing how the AV makes decisions that respect human reasons according to the weights you set")
+            st.write("A video showing how the AV makes decisions that respect human reasons according to the weights you set")
             # Display the video
             st.video(str(video_path))
 
@@ -3345,7 +3269,7 @@ if st.button("Run Simulation",
     # Normalize 1st set
     total1 = weight_policy + weight_driver + weight_cyclist
     if total1 == 0:
-        norm_policy = norm_driver = norm_cyclist = round(1 / 3, 1)
+        norm_policy = norm_driver = norm_cyclist = round(1/3, 1)
     else:
         norm_policy = round(weight_policy / total1, 1)
         norm_driver = round(weight_driver / total1, 1)
@@ -3363,11 +3287,12 @@ if st.button("Run Simulation",
     # Normalize ideal set
     total3 = ideal_weight_cyclist + ideal_weight_driver + ideal_weight_policymaker
     if total3 == 0:
-        ideal_weight_cyclist = ideal_weight_driver = ideal_weight_policymaker = round(1 / 3, 1)
+        ideal_weight_cyclist = ideal_weight_driver = ideal_weight_policymaker = round(1/3, 1)
     else:
         ideal_weight_cyclist = round(ideal_weight_cyclist / total3, 1)
         ideal_weight_driver = round(ideal_weight_driver / total3, 1)
         ideal_weight_policymaker = round(ideal_weight_policymaker / total3, 1)
+
 
     # Gather all parameters into a dictionary
     params_to_update = {
@@ -3396,11 +3321,9 @@ if st.button("Run Simulation",
     # Update parameters file before running the simulation
     update_parameters_file(params_to_update)
     st.success(f"Parameters in '{PARAMETERS_PATH.name}' updated successfully.")
-
+    
     import lib.parameters
-
     importlib.reload(lib.parameters)
     from lib.parameters import CyclistParameters, DriverParameters, ScenarioParameters, MPCParameters, ReasonParameters
 
-    run_simulation(norm_policy, norm_driver, norm_cyclist, ideal_weight_cyclist, ideal_weight_driver,
-                   ideal_weight_policymaker, xxx0, xxx1, xxx2, xxx3, yyy0, yyy1, yyy2, yyy3, zzz0, zzz1, zzz2, zzz3)
+    run_simulation(norm_policy, norm_driver, norm_cyclist, ideal_weight_cyclist, ideal_weight_driver, ideal_weight_policymaker, xxx0, xxx1, xxx2, xxx3, yyy0, yyy1, yyy2, yyy3, zzz0, zzz1, zzz2, zzz3)

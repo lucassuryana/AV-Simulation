@@ -52,6 +52,7 @@ class ArterialMultiLanes:
         goal = (ScenarioParameters.X_LOC_EGO, ScenarioParameters.Y_LOC_GOAL, np.pi/2)
 
         car_dimensions: CarDimensions = BicycleModelDimensions(skip_back_circle_collision_checking=False)
+        adjustment_x_goal = 0.30 # to adjust the goal area to be centered at the goal point
         goal_area = BoxObstacle(xy_width=(car_dimensions.bounding_box_size[0], car_dimensions.bounding_box_size[1]), height=1, xy_center=(goal[0], goal[1]))
 
         # TO SET GOAL AREA AS A BOX
