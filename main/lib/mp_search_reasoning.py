@@ -5,6 +5,7 @@ This is a comprehensive version of motion primitive search that combines:
 2. The road user behavior models from mp_search_ww_generic_reasons.py
 '''
 import sys
+
 sys.path.append('..')
 
 from itertools import product
@@ -31,37 +32,50 @@ from lib.parameters import CyclistParameters, DriverParameters
 
 NodeType = Tuple[float, float, float]
 
+
 class MotionPrimitiveSearch:
     def __init__(self, scenario: Scenario, car_dimensions: CarDimensions, mps: Dict[str, MotionPrimitive],
                  margin: float,
+                 xxx0: float,
+                 xxx1: float,
+                 xxx2: float,
+                 xxx3: float,
+                 yyy0: float,
+                 yyy1: float,
+                 yyy2: float,
+                 yyy3: float,
+                 zzz0: float,
+                 zzz1: float,
+                 zzz2: float,
+                 zzz3: float,
                  moving_obstacles_state: np.ndarray = None,
                  centerline: float = 0.0,
                  # Reasoning weights (as lists to enable multiple trajectory generation)
-                 wh_ego: List[float] = None, 
-                 wh_policy: List[float] = None, 
+                 wh_ego: List[float] = None,
+                 wh_policy: List[float] = None,
                  wh_rUser1: List[float] = None,
-                 wh_rUser2: List[float] = None, 
+                 wh_rUser2: List[float] = None,
                  wh_rUser3: List[float] = None,
                  # Original heuristic weights
-                 wh_dist2goal: float = 0.25, 
-                 wh_theta2goal: float = 2.7, 
+                 wh_dist2goal: float = 0.25,
+                 wh_theta2goal: float = 2.7,
                  wh_steer2goal: float = 15.0,
-                 wh_dist2obs: float = 0.0, 
+                 wh_dist2obs: float = 0.0,
                  wh_dist2center: float = 0.0,
                  # Reasoning-specific weights (from mp_search_ww_generic_reasons.py)
                  wh_ego_patience_reason: float = 0.25,
                  wh_ego_efficiency_reason: float = 0.25,
                  wh_ego_human_like_reason: float = 0.25,
                  wh_ego_goal_reason: float = 0.25,
-                 wh_policymaker_rightlane_reason: float = 1.0, 
+                 wh_policymaker_rightlane_reason: float = 1.0,
                  wh_rUser1_comfort_reason: float = 1.0,
                  # Time tracking for proximity calculations
                  driver_elapsed_time: float = 0.0,
                  cyclist_elapsed_time: float = 0.0,
                  # Weights for the real cost function
-                 wc_dist: float = 1.0, 
-                 wc_steering: float = 5.0, 
-                 wc_obstacle: float = 0.1, 
+                 wc_dist: float = 1.0,
+                 wc_steering: float = 5.0,
+                 wc_obstacle: float = 0.1,
                  wc_center: float = 0.0):
 
         self.CENTERLINE_LOCATION = centerline
@@ -78,28 +92,28 @@ class MotionPrimitiveSearch:
         self._gx, self._gy, self._gtheta = scenario.goal_point
 
         self._a_star: AStar[NodeType] = AStar(neighbor_function=self.neighbor_function)
-        
+
         # Initialize high-level reasoning weights (as lists for multiple trajectory generation)
-        self._wh_ego_list = wh_ego if wh_ego else [0.4, 0.0, 0.5]
-        self._wh_policy_list = wh_policy if wh_policy else [0.4, 0.5, 0.0]
-        self._wh_rUser1_list = wh_rUser1 if wh_rUser1 else [0.2, 0.5, 0.5]
+        self._wh_ego_list = wh_ego if wh_ego else [yyy0, yyy1, yyy2, yyy3]
+        self._wh_policy_list = wh_policy if wh_policy else [xxx0, xxx1, xxx2, xxx3]
+        self._wh_rUser1_list = wh_rUser1 if wh_rUser1 else [zzz0, zzz1, zzz2, zzz3]
         self._wh_rUser2_list = wh_rUser2 if wh_rUser2 else [0.0, 0.0, 0.0]
         self._wh_rUser3_list = wh_rUser3 if wh_rUser3 else [0.0, 0.0, 0.0]
-        
+
         # Initialize the current weights (will be updated during run_all)
         self._current_wh_ego = self._wh_ego_list[0]
         self._current_wh_policy = self._wh_policy_list[0]
         self._current_wh_rUser1 = self._wh_rUser1_list[0]
         self._current_wh_rUser2 = self._wh_rUser2_list[0]
         self._current_wh_rUser3 = self._wh_rUser3_list[0]
-        
+
         # Original heuristic weights
         self._wh_dist2goal = wh_dist2goal
         self._wh_theta2goal = wh_theta2goal
         self._wh_steer2goal = wh_steer2goal
         self._wh_dist2obs = wh_dist2obs
         self._wh_dist2center = wh_dist2center
-        
+
         # Reasoning-specific weights
         self._wh_policymaker_rightlane_reason = wh_policymaker_rightlane_reason
         self._wh_rUser1_comfort_reason = wh_rUser1_comfort_reason
@@ -113,10 +127,10 @@ class MotionPrimitiveSearch:
         self._wc_steering = wc_steering
         self._wc_obstacle = wc_obstacle
         self._wc_center = wc_center
-        
+
         # For each motion primitive, create collision points
         self._mp_collision_points: Dict[str, np.ndarray] = self._create_collision_points()
-        
+
         # Initialize proximity tracking using passed values instead of resetting to 0
         self._driver_proximity_time = driver_elapsed_time
         self._cyclist_proximity_time = cyclist_elapsed_time
@@ -140,7 +154,8 @@ class MotionPrimitiveSearch:
 
         return out
 
-    def calculate_steering_change_cost(self, current_node: NodeType, next_node: NodeType, steering_angle_weight: float = 1.0) -> float:
+    def calculate_steering_change_cost(self, current_node: NodeType, next_node: NodeType,
+                                       steering_angle_weight: float = 1.0) -> float:
         """
         Calculates the cost associated with the change in steering angle required to transition from the current node to the next node.
         :param current_node: The current node (state) represented as a tuple (x, y, theta).
@@ -159,24 +174,24 @@ class MotionPrimitiveSearch:
 
         # Calculate the cost associated with this change in orientation
         steering_change_cost = abs(orientation_change) * steering_angle_weight
-        
+
         return steering_change_cost
-    
+
     def calculate_distance_point_to_halfplane(self, point: Tuple[float, float], half_planes: np.ndarray) -> float:
         """
         Calculate the minimum distance from a 2D point to a rectangular obstacle represented by half-planes.
-        
+
         :param point: A tuple representing the (x, y) coordinates of the point.
         :param half_planes: A numpy array of shape (n, 3) where each row represents the coefficients (a, b, c) of a half-plane equation.
         :return: The minimum distance from the point to the obstacle's boundary represented by half-planes.
         """
         x0, y0 = point
         distances = []
-        
+
         for a, b, c in half_planes:
-            distance = abs(a*x0 + b*y0 + c) / (a**2 + b**2)**0.5
+            distance = abs(a * x0 + b * y0 + c) / (a ** 2 + b ** 2) ** 0.5
             distances.append(distance)
-        
+
         return min(distances)
 
     def distance_to_nearest_obstacle(self, node: NodeType) -> float:
@@ -187,7 +202,7 @@ class MotionPrimitiveSearch:
         """
         x, y, _ = node  # Extract the position of the node. Ignore orientation.
         min_distance = float('inf')
-            
+
         for obstacle_half_planes in self._obstacles_hp:
             distance = self.calculate_distance_point_to_halfplane((x, y), obstacle_half_planes)
             if distance < min_distance:
@@ -217,7 +232,7 @@ class MotionPrimitiveSearch:
     def run_all(self, debug=False):
         """
         Run the A* search with combinations of weights from the initialized lists.
-        
+
         Each combination takes one value from each list at the same index.
         The combinations represent different prioritizations (the values are based on the initialization lists):
         1. [0.6, 0.1, 0.3, 0.0, 0.0] - Ego priority
@@ -226,25 +241,25 @@ class MotionPrimitiveSearch:
         4. [0.2, 0.4, 0.4, 0.0, 0.0] - Policy & rUser1 balance
         5. [0.4, 0.2, 0.4, 0.0, 0.0] - Ego & rUser1 balance
         6. [0.33, 0.33, 0.34, 0.0, 0.0] - Equal balance
-        
+
         Args:
             debug: Whether to collect debug data during search
-            
+
         Returns:
             tuple: Lists of costs, paths, and trajectories for all combinations
         """
         trajectories = []
         costs = []
         paths = []
-        
+
         # Create column-wise combinations from the initialization lists
         # Each combination uses one value from each list at the same index
-        num_combinations = min(len(self._wh_ego_list), 
-                            len(self._wh_policy_list),
-                            len(self._wh_rUser1_list),
-                            len(self._wh_rUser2_list),
-                            len(self._wh_rUser3_list))
-        
+        num_combinations = min(len(self._wh_ego_list),
+                               len(self._wh_policy_list),
+                               len(self._wh_rUser1_list),
+                               len(self._wh_rUser2_list),
+                               len(self._wh_rUser3_list))
+
         priority_names = [
             "Ego priority",
             "Policy priority",
@@ -253,7 +268,7 @@ class MotionPrimitiveSearch:
             "Ego & rUser1 balance",
             "Equal balance"
         ]
-        
+
         # Iterate through the combinations
         for i in range(num_combinations):
             # Get weights from each list at index i
@@ -262,26 +277,26 @@ class MotionPrimitiveSearch:
             wh_rUser1 = self._wh_rUser1_list[i]
             wh_rUser2 = self._wh_rUser2_list[i]
             wh_rUser3 = self._wh_rUser3_list[i]
-            
+
             # Log the combination being evaluated
             priority_name = priority_names[i] if i < len(priority_names) else f"Combination {i}"
             print(f"Evaluating {priority_name}: [{wh_ego}, {wh_policy}, {wh_rUser1}, {wh_rUser2}, {wh_rUser3}]")
-            
+
             # Update current weights
             self._current_wh_ego = wh_ego
             self._current_wh_policy = wh_policy
             self._current_wh_rUser1 = wh_rUser1
             self._current_wh_rUser2 = wh_rUser2
             self._current_wh_rUser3 = wh_rUser3
-            
+
             # Run A* with current weights
             cost, path, trajectory = self.run(debug=debug)
             trajectories.append((trajectory, (wh_ego, wh_policy, wh_rUser1, wh_rUser2, wh_rUser3)))
             costs.append(cost)
             paths.append(path)
-            
+
             print(f"Completed {priority_name} with cost {cost}")
-        
+
         return costs, paths, trajectories
 
     def is_goal(self, node: Tuple[float, float, float]) -> bool:
@@ -294,21 +309,21 @@ class MotionPrimitiveSearch:
     def normalize_distance_to_goal(self, x, y, goal_x, goal_y):
         """
         Calculate and normalize the Euclidean distance to the goal.
-        
+
         Args:
             x, y: Current position coordinates
             goal_x, goal_y: Goal position coordinates
-            
+
         Returns:
             float: Normalized distance (0.0 = at goal, 1.0 = at or beyond maximum distance)
         """
         # Calculate raw Euclidean distance
-        raw_distance_xy = np.sqrt((x - goal_x)**2 + (y - goal_y)**2)
-        
+        raw_distance_xy = np.sqrt((x - goal_x) ** 2 + (y - goal_y) ** 2)
+
         # Normalize to 0-1 range where 0 = at goal, 1 = at or beyond 80 meters
         MAX_DISTANCE = ScenarioParameters.LENGTH  # meters
         normalized_distance = min(raw_distance_xy / MAX_DISTANCE, 1.0)
-        
+
         return normalized_distance
 
     def compute_centerline_deviation_cost(self, x):
@@ -316,21 +331,21 @@ class MotionPrimitiveSearch:
         Calculate the cost for deviating from the centerline based on specific road rules:
         - If x < 0: Cost ranges from 0 (at centerline) to 1 (at -3 meters)
         - If x ≥ 0: Cost is always 0
-        
+
         Args:
             x: Current x-coordinate of the vehicle
-            
+
         Returns:
             float: Normalized cost (0-1) based on specified rules
         """
         # Road parameters
         MAX_DEVIATION = 3.0  # meters from centerline, width of one lane
-        
+
         # Only apply cost when x is negative (left of centerline)
         if x < 0:
             # Calculate deviation (how far left of centerline)
             deviation = abs(x - self.CENTERLINE_LOCATION)
-            
+
             # Normalize to 0-1 range, capped at 1.0
             return min(deviation / MAX_DEVIATION, 1.0)
         else:
@@ -340,29 +355,29 @@ class MotionPrimitiveSearch:
     def compute_bicycle_time_cost(self, distance_to_moving_obstacles):
         """
         Calculate time-based cyclist comfort factor based on time spent in close proximity.
-        
+
         Args:
             distance_to_moving_obstacles: Distance between vehicle and cyclist (meters)
-            
+
         Returns:
             float: Time-based comfort cost (0.0 = comfortable, 1.0 = maximum discomfort)
         """
         # Define threshold for "too close"
         SAFETY_DISTANCE = CyclistParameters.DISTANCE_REF  # meters
-        
+
         # If we're too close, increment the time counter
         if distance_to_moving_obstacles < SAFETY_DISTANCE:
             self._cyclist_proximity_time += self._mps['straight'].n_seconds  # Add time for each node call
         else:
             # Reset the counter if we're not too close anymore
             self._cyclist_proximity_time = 0.0
-        
+
         # Define maximum allowed time in close proximity
         MAX_ALLOWED_TIME = CyclistParameters.TIME_THRESHOLD  # seconds
-        
+
         # Define saturation time (when discomfort reaches maximum)
         SATURATION_TIME = MAX_ALLOWED_TIME * 2.0  # seconds
-        
+
         # Calculate time-based penalty
         if self._cyclist_proximity_time <= MAX_ALLOWED_TIME:
             # No discomfort if within allowed time
@@ -372,7 +387,8 @@ class MotionPrimitiveSearch:
             return 1.0
         else:
             # Linear interpolation between allowed time and saturation time
-            normalized_excess_time = (self._cyclist_proximity_time - MAX_ALLOWED_TIME) / (SATURATION_TIME - MAX_ALLOWED_TIME)
+            normalized_excess_time = (self._cyclist_proximity_time - MAX_ALLOWED_TIME) / (
+                        SATURATION_TIME - MAX_ALLOWED_TIME)
             return normalized_excess_time
 
     def compute_bicycle_distance_cost(self, distance_to_moving_obstacles: float) -> float:
@@ -380,68 +396,68 @@ class MotionPrimitiveSearch:
         Calculate the cyclist's comfort based on distance to the vehicle:
         - If distance > MIN_SAFE_DISTANCE: Cost is 0.0 (cyclist is comfortable)
         - If distance <= MIN_SAFE_DISTANCE: Cost increases exponentially from 0.0 to 1.0
-        
+
         Args:
             distance_to_moving_obstacles: Distance between vehicle and cyclist (meters)
-            
+
         Returns:
             float: Comfort cost, where 0.0 is comfortable and 1.0 is very uncomfortable
         """
         # Minimum safe distance threshold
         MIN_SAFE_DISTANCE = CyclistParameters.DISTANCE_REF  # meters
-        
+
         # If we're beyond the minimum safe distance, cyclist is comfortable (cost = 0)
         if distance_to_moving_obstacles >= MIN_SAFE_DISTANCE:
             return 0.0
-        
+
         # Calculate how much we've encroached below the minimum safe distance
         encroachment = MIN_SAFE_DISTANCE - distance_to_moving_obstacles
-        
+
         # Define how quickly discomfort grows as distance decreases
         # Higher values make the cost grow more rapidly
         growth_rate = 0.5
-        
+
         # Calculate exponential cost
         # This gives us 0 when at MIN_SAFE_DISTANCE and approaches 1 as distance decreases
         cost = 1.0 - np.exp(-growth_rate * encroachment)
-        
+
         # Determine at what encroachment we want to reach a cost of 1.0
         # We'll set it to reach 1.0 when distance is 0 (collision)
         max_encroachment = MIN_SAFE_DISTANCE  # When distance is 0
         max_cost = 1.0 - np.exp(-growth_rate * max_encroachment)
-        
+
         # Scale to ensure we reach exactly 1.0 at maximum encroachment
         scaled_cost = cost / max_cost if max_cost > 0 else cost
-        
+
         return min(scaled_cost, 1.0)  # Cap at 1.0 to be safe
 
     def compute_ego_patience(self, distance_to_moving_obstacles):
         """
         Calculate driver impatience based on time spent too close to cyclist.
         Normalized to return values between 0 and 1.
-        
+
         Args:
             distance_to_moving_obstacles: Distance between vehicle and cyclist (meters)
-            
+
         Returns:
             float: Driver impatience (0.0 = patient, 1.0 = completely impatient)
         """
         # Define threshold for "too close"
         SAFETY_DISTANCE = DriverParameters.DISTANCE_REF  # meters
-        
+
         # If we're too close, increment the time counter
         if distance_to_moving_obstacles < SAFETY_DISTANCE:
             self._driver_proximity_time += self._mps['straight'].n_seconds  # Add time for each node call
         else:
             # Reset the counter if we're not too close anymore
             self._driver_proximity_time = 0.0
-            
+
         # Define maximum allowed time in close proximity
         MAX_ALLOWED_TIME = DriverParameters.TIME_THRESHOLD  # seconds
-        
+
         # Define saturation time (when patience fully expires)
         SATURATION_TIME = MAX_ALLOWED_TIME * 1.5  # seconds after threshold when impatience reaches maximum
-        
+
         # Calculate time-based impatience
         if self._driver_proximity_time <= MAX_ALLOWED_TIME:
             # No impatience if within allowed time
@@ -452,54 +468,56 @@ class MotionPrimitiveSearch:
         else:
             # Exponential growth of impatience between threshold and saturation
             excess_time = self._driver_proximity_time - MAX_ALLOWED_TIME
-            
+
             # Exponential function that grows from 0 to 1
             raw_impatience = 1.0 - np.exp(-3.0 * excess_time / SATURATION_TIME)
-            
+
             # Ensure the function reaches exactly 1.0 at saturation time
             max_possible_value = 1.0 - np.exp(-3.0)
             normalized_impatience = raw_impatience / max_possible_value
-            
+
             return min(normalized_impatience, 1.0)  # Cap at 1.0 for safety
 
     def heuristicCost(self, node: NodeType) -> float:
         x, y, theta = node
         goal_x, goal_y, goal_orientation = self._goal_point
-        
+
         # Calculate basic components
-        distance_xy = np.sqrt((x - goal_x)**2 + (y - goal_y)**2)
+        distance_xy = np.sqrt((x - goal_x) ** 2 + (y - goal_y) ** 2)
         normalized_distance_xy = self.normalize_distance_to_goal(x, y, goal_x, goal_y)
-        distance_theta = min(abs(theta - goal_orientation), abs(theta - goal_orientation) - self._allowed_goal_theta_difference/2)
+        distance_theta = min(abs(theta - goal_orientation),
+                             abs(theta - goal_orientation) - self._allowed_goal_theta_difference / 2)
         steering_change_cost = self.calculate_steering_change_cost(node, self._goal_point, steering_angle_weight=1.0)
-        
+
         # Calculate obstacle and center components
         obstacle_avoidance_cost = 0.0
         distance_from_center = 0.0
-        
+
         if self._wh_dist2obs != 0.0:
             distance_to_obstacle = self.distance_to_nearest_obstacle(node)
             obstacle_avoidance_cost = 1 / distance_to_obstacle if distance_to_obstacle > 0 else float('inf')
-            
+
         if self._wh_dist2center != 0.0:
-            distance_from_center = np.sqrt(x**2 + y**2)
-        
+            distance_from_center = np.sqrt(x ** 2 + y ** 2)
+
         if self._moving_obstacles_state is not None:
             # Update bicycle position (project forward)
             # Projected bicycle forward, s = v * t
             projected_rUser1_x = self._moving_obstacles_state[0]
-            projected_rUser1_y = self._moving_obstacles_state[1] + self._moving_obstacles_state[2] * self._mps['straight'].n_seconds
-            
+            projected_rUser1_y = self._moving_obstacles_state[1] + self._moving_obstacles_state[2] * self._mps[
+                'straight'].n_seconds
+
             # Calculate the distance between the current node and the moving obstacles
             distance_to_rUser1 = np.linalg.norm(
                 [x - projected_rUser1_x, y - projected_rUser1_y])
 
             # === Reasoning Components ===
-            
+
             # Check if the ego vehicle has passed the bicycle
             # Assume forward direction is along y-axis
             PASSING_MARGIN = 2.0  # meters - how far ahead the vehicle needs to be to be considered "passed"
             has_passed_bicycle = y > (projected_rUser1_y + PASSING_MARGIN)
-            
+
             # Ego-related costs (efficiency and patience)
             # Driver patience only matters if we're behind the bicycle or just passing
             if has_passed_bicycle:
@@ -508,26 +526,26 @@ class MotionPrimitiveSearch:
             else:
                 # Otherwise calculate normally
                 ego_patience = self.compute_ego_patience(distance_to_rUser1)
-            
+
             ego_cost = (self._wh_ego_efficiency_reason * normalized_distance_xy +
                         self._wh_ego_patience_reason * ego_patience +
                         self._wh_ego_human_like_reasons * steering_change_cost +
                         self._wh_ego_goal_reason * distance_theta)
-            
+
             # Policy-related costs (centerline deviation)
             if has_passed_bicycle:
                 # After passing, vehicle should stay in the middle of the right lane
                 # Assuming right lane center is at x = 1.9 (adjust this value based on your road geometry)
                 RIGHT_LANE_CENTER = 1.5  # meters (adjust as needed)
-                
+
                 # Calculate deviation from right lane center (should be minimized)
                 deviation_from_right_lane = abs(x - RIGHT_LANE_CENTER)
-                
+
                 # Normalize to 0-1 range (0 = perfect center, 1 = far from center)
                 # Assuming lane width is about 3 meters
                 LANE_WIDTH = 3  # meters
-                normalized_deviation = min(deviation_from_right_lane / (LANE_WIDTH/2), 1.0)
-                
+                normalized_deviation = min(deviation_from_right_lane / (LANE_WIDTH / 2), 1.0)
+
                 # Use this as the policy cost - encourages staying in lane center
                 centerline_deviation = normalized_deviation
             else:
@@ -535,7 +553,7 @@ class MotionPrimitiveSearch:
                 centerline_deviation = self.compute_centerline_deviation_cost(x)
 
             policy_cost = self._wh_policymaker_rightlane_reason * centerline_deviation
-            
+
             # Road User 1 (Cyclist) costs - comfort based on distance and time
             # Cyclist comfort only matters if we're behind or currently passing
             if has_passed_bicycle:
@@ -546,10 +564,10 @@ class MotionPrimitiveSearch:
                 # Otherwise calculate normally
                 cyclist_distance_comfort = self.compute_bicycle_distance_cost(distance_to_rUser1)
                 cyclist_time_comfort = self.compute_bicycle_time_cost(distance_to_rUser1)
-            
+
             cyclist_total_comfort = cyclist_distance_comfort * cyclist_time_comfort
             rUser1_cost = self._wh_rUser1_comfort_reason * cyclist_total_comfort
-            
+
             # Road User 2 and 3 costs (can be expanded in the future)
             rUser2_cost = 0.0
             rUser3_cost = 0.0
@@ -557,36 +575,36 @@ class MotionPrimitiveSearch:
             # If no moving obstacles, use simpler cost structure
             # Ego-related costs (efficiency and patience)
             ego_cost = (
-                        self._wh_dist2goal * distance_xy + 
-                          self._wh_dist2obs * obstacle_avoidance_cost +
-                            self._wh_dist2center * distance_from_center +
-                                self._wh_theta2goal * distance_theta +
-                                    self._wh_steer2goal * steering_change_cost
-                        )
-            
-            # Policy-related costs (centerline deviation)            
+                    self._wh_dist2goal * distance_xy +
+                    self._wh_dist2obs * obstacle_avoidance_cost +
+                    self._wh_dist2center * distance_from_center +
+                    self._wh_theta2goal * distance_theta +
+                    self._wh_steer2goal * steering_change_cost
+            )
+
+            # Policy-related costs (centerline deviation)
             policy_cost = 0.0
             rUser1_cost = 0.0
             rUser2_cost = 0.0
             rUser3_cost = 0.0
-        
+
         # Combine with high-level weights
-        GLOBAL_SCALE = 200.0 
+        GLOBAL_SCALE = 200.0
         heuristic_cost = (self._current_wh_ego * ego_cost +
-                         self._current_wh_policy * policy_cost +
-                         self._current_wh_rUser1 * rUser1_cost +
-                         self._current_wh_rUser2 * rUser2_cost +
-                         self._current_wh_rUser3 * rUser3_cost) * GLOBAL_SCALE
-        
+                          self._current_wh_policy * policy_cost +
+                          self._current_wh_rUser1 * rUser1_cost +
+                          self._current_wh_rUser2 * rUser2_cost +
+                          self._current_wh_rUser3 * rUser3_cost) * GLOBAL_SCALE
+
         return heuristic_cost
 
     def neighbor_function(self, node: NodeType) -> Iterable[Tuple[float, NodeType]]:
         node_rel_to_world_mtx = create_2d_transform_mtx(*node)
-        
+
         for mp_name, mp in self._mps.items():
             # Transform Collision Checking Points Given Existing Matrix
             collision_checking_points = transform_2d_pts(node[2], node_rel_to_world_mtx,
-                                                        self._mp_collision_points[mp_name])
+                                                         self._mp_collision_points[mp_name])
             collision_checking_points_xy = collision_checking_points[:, :2].T
 
             # Check Collision With Every Obstacle
@@ -614,23 +632,23 @@ class MotionPrimitiveSearch:
 
                 # Calculate costs
                 steering_change_cost = self.calculate_steering_change_cost(node, neighbor, steering_angle_weight=1.0)
-                
+
                 obstacle_avoidance_cost = 0.0
                 distance_from_center = 0.0
-                
+
                 if self._wc_obstacle != 0.0:
                     distance_to_obstacle = self.distance_to_nearest_obstacle(neighbor)
                     obstacle_avoidance_cost = 1 / distance_to_obstacle if distance_to_obstacle > 0 else float('inf')
-                    
-                if self._wc_center != 0.0: 
+
+                if self._wc_center != 0.0:
                     distance_from_center = np.linalg.norm([x, y])
-                
+
                 # Combine costs with weights
-                cost = (self._wc_dist * mp.total_length + 
-                       self._wc_steering * steering_change_cost + 
-                       self._wc_obstacle * obstacle_avoidance_cost + 
-                       self._wc_center * distance_from_center)
-                
+                cost = (self._wc_dist * mp.total_length +
+                        self._wc_steering * steering_change_cost +
+                        self._wc_obstacle * obstacle_avoidance_cost +
+                        self._wc_center * distance_from_center)
+
                 yield cost, neighbor
 
     def path_to_full_trajectory(self, path: List[NodeType]) -> np.ndarray:
@@ -644,7 +662,7 @@ class MotionPrimitiveSearch:
             points_this = self.motion_primitive_at(mp_name=mp_name, configuration=p1)[:-1]
             points.append(points_this)
 
-        # get the whole trajectory 
+        # get the whole trajectory
         return np.concatenate(points, axis=0)
 
 
@@ -673,9 +691,9 @@ if __name__ == '__main__':
         wh_rUser1=[0.5, 0.25]
     )
 
-    draw_scenario(scenario, mps, car_dimensions, search, ax, draw_obstacles=True, 
-                 draw_goal=True, draw_car=True, draw_mps=False, draw_mps2=False, 
-                 draw_collision_checking=False, draw_car2=False)
+    draw_scenario(scenario, mps, car_dimensions, search, ax, draw_obstacles=True,
+                  draw_goal=True, draw_car=True, draw_mps=False, draw_mps2=False,
+                  draw_collision_checking=False, draw_car2=False)
 
     solutions = search.run_all(debug=True)
 
@@ -683,7 +701,7 @@ if __name__ == '__main__':
     for i, (traj, weights) in enumerate(solutions):
         label = f'ego={weights[0]:.2f}, policy={weights[1]:.2f}, cyclist={weights[2]:.2f}'
         ax.plot(traj[:, 0], traj[:, 1], label=label, linewidth=2)
-        
+
         # Optionally, add markers at key points for better visualization
         if i == 0:  # Only for the first trajectory to avoid clutter
             # Mark points every 10 steps
@@ -697,15 +715,15 @@ if __name__ == '__main__':
 
     # Add clear legend
     ax.legend(loc='best', fontsize=10)
-    
+
     # Add grid and labels
     ax.grid(True, linestyle='--', alpha=0.7)
     ax.set_xlabel('X position (m)', fontsize=12)
     ax.set_ylabel('Y position (m)', fontsize=12)
     ax.set_title('Motion Primitive Search with Multi-Agent Reasoning', fontsize=14)
-    
+
     # Ensure equal aspect ratio
     ax.axis('equal')
-    
+
     plt.tight_layout()
     plt.show()
