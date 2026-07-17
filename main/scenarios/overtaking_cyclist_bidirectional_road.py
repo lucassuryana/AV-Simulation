@@ -1979,12 +1979,28 @@ def initialize_simulation() -> tuple:
     scenario_no_obstacles = arterial.create_scenario()
     scenario_visualization = arterial.create_scenario(frame_visualization=True)
 
-    # Define moving obstacles
-    spawn_location_x = scenario_no_obstacles.start[0] + ScenarioParameters.X_LOC_CYCLIST_BUFFER
-    spawn_location_y = scenario_no_obstacles.start[1] + ScenarioParameters.Y_LOC_CYCLIST_BUFFER
-    moving_obstacles = [
-        MovingObstacleArterial(bicycle_dimensions, spawn_location_x, spawn_location_y, speed = CyclistParameters.SPEED, initial_speed = CyclistParameters.SPEED, offset=True, dt=ScenarioParameters.DT)
+    # Define moving obstacles via a config list — add/remove/edit agents here.
+    AGENT_CONFIGS = [
+        {
+            "name": "cyclist",
+            "x_buffer": ScenarioParameters.X_LOC_CYCLIST_BUFFER,
+            "y_buffer": ScenarioParameters.Y_LOC_CYCLIST_BUFFER,
+            "speed": CyclistParameters.SPEED,
+            "heading": np.pi / 2,  # same direction as ego
+        },
     ]
+
+    moving_obstacles = []
+    for cfg in AGENT_CONFIGS:
+        spawn_location_x = scenario_no_obstacles.start[0] + cfg["x_buffer"]
+        spawn_location_y = scenario_no_obstacles.start[1] + cfg["y_buffer"]
+        moving_obstacles.append(
+            MovingObstacleArterial(
+                bicycle_dimensions, spawn_location_x, spawn_location_y,
+                speed=cfg["speed"], initial_speed=cfg["speed"],
+                offset=True, dt=ScenarioParameters.DT, heading=cfg["heading"],
+            )
+        )
 
     return mps, car_dimensions, bicycle_dimensions, arterial, scenario_no_obstacles, scenario_visualization, moving_obstacles
 
