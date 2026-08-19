@@ -7,6 +7,7 @@ import os
 import subprocess
 import sys
 import time
+from collections import deque
 from typing import List
 
 # Third-party libraries
@@ -34,8 +35,14 @@ from lib.parameters import CyclistParameters, DriverParameters, ScenarioParamete
 
 # Initialize logging
 import logging
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(level=logging.INFO, force=True)
 logger = logging.getLogger(__name__)
+logger.setLevel(logging.DEBUG)  # this script's own logger only — keeps third-party libs (matplotlib, cvxpy) at INFO
+
+# Step 2: steady-state following detection
+STABILITY_WINDOW = 5          # consecutive frames to confirm steady state
+DISTANCE_STABLE_EPS = 0.05    # meters — distance change below this counts as "not decreasing"
+SPEED_CONVERGENCE_EPS = 0.3   # m/s — ego/obstacle speed difference below this counts as "converged"
 
 def main(replanner: bool = False, vis_frame: bool = False, save_weight_table: bool = False, historical_plot: bool = False) -> None:
     """
@@ -96,6 +103,8 @@ def main(replanner: bool = False, vis_frame: bool = False, save_weight_table: bo
 
     traj_agent_idx = 0
     tmp_trajectory = None
+    collision_hold_active = False
+    distance_history = deque(maxlen=STABILITY_WINDOW)
 
     loop_runtimes = []
 
@@ -132,6 +141,22 @@ def main(replanner: bool = False, vis_frame: bool = False, save_weight_table: bo
                                                       trajs_moving_obstacles,
                                                       frame_window=MPCParameters.FRAME_WINDOW)
 
+        # --- Step 2: distinguish "actively closing" from "steady following" ---
+        if collision_xy is not None:
+            obstacle_x, obstacle_y, obstacle_v, _, _, _ = moving_obstacles[0].get()
+            current_distance = math.hypot(state.x - obstacle_x, state.y - obstacle_y)
+            distance_history.append(current_distance)
+
+            steady = is_steady_following(distance_history, state.v, obstacle_v)
+            collision_hold_active = not steady
+
+            logger.debug(f"t={i*ScenarioParameters.DT:.2f}s dist={current_distance:.2f} "
+                         f"ego_v={state.v:.2f} obs_v={obstacle_v:.2f} "
+                         f"steady={steady} hold_active={collision_hold_active}")
+        else:
+            distance_history.clear()
+            collision_hold_active = False
+
         # If replanner is enabled, based on reasons evaluation, determine if a replan is needed
         if replanner == True:
             # Flag to determine if a replan should happen
@@ -160,6 +185,11 @@ def main(replanner: bool = False, vis_frame: bool = False, save_weight_table: bo
                             time_passed_cyclist=TIME_PASSED_CYCLIST
                         )
                 scenario = scenario_obstacles
+                # collision_xy is now perform_replan's own detection, consistent with the new
+                # trajectory_full — needed so the cutoff step below finds a point that actually
+                # exists on the new curve. hold_active above was already computed against the
+                # pre-replan physical distance/speed, so it's unaffected by this overwrite.
+                distance_history.clear()
 
         # Cut off the trajectory before a collision occurs, with an additional margin
         if collision_xy is not None:
@@ -239,6 +269,24 @@ def cutoff_trajectory_before_collision(EXTRA_CUTOFF_MARGIN, collision_xy, traj_a
     tmp_trajectory = trajectory_full[:cutoff_idx]
 
     return tmp_trajectory
+
+
+def is_steady_following(distance_history, ego_speed, obstacle_speed,
+                        distance_eps=DISTANCE_STABLE_EPS,
+                        speed_eps=SPEED_CONVERGENCE_EPS):
+    """
+    True if the ego has stabilized behind the obstacle rather than actively
+    closing on it — distance non-decreasing over the window AND speeds have
+    converged. False (i.e. "still closing") if there isn't enough history yet.
+    """
+    if len(distance_history) < distance_history.maxlen:
+        return False
+
+    deltas = np.diff(distance_history)
+    distance_non_decreasing = np.all(deltas > -distance_eps)
+    speed_converged = abs(ego_speed - obstacle_speed) < speed_eps
+
+    return distance_non_decreasing and speed_converged
 
 
 def compute_predicted_trajectory(state, trajectory_res, last_index=None):
@@ -330,7 +378,14 @@ def perform_replan(arterial, car_dimensions, bicycle_dimensions, dl, moving_obst
     search = MotionPrimitiveSearch(scenario_obstacles, car_dimensions, mps, margin=car_dimensions.radius,
                                    moving_obstacles_state=bicycle_state,
                                     driver_elapsed_time=time_elapsed_driver,
-                                    cyclist_elapsed_time=time_passed_cyclist
+                                    cyclist_elapsed_time=time_passed_cyclist,
+                                    # Single fixed weighting — disables the multi-weight comparison
+                                    # so we can isolate and test just the replanning mechanism itself.
+                                    wh_ego=[0.33],
+                                    wh_policy=[0.33],
+                                    wh_rUser1=[0.34],
+                                    wh_rUser2=[0.0],
+                                    wh_rUser3=[0.0],
                                 )
 
     # Calculate all trajectories
@@ -407,10 +462,25 @@ def perform_replan(arterial, car_dimensions, bicycle_dimensions, dl, moving_obst
     return collision_xy, mpc, traj_agent_idx, trajectory_full, scenario_obstacles
 
 
-def create_following_trajectory(state, trajectories_full):
-    # Add one trajectory if the ego keeps stay on its current lane following the cyclist
-    # Pick one of the trajectories_full in order calculate completion_time
-    resampled_trajectory = compute_predicted_trajectory(state, trajectories_full[0][0])
+def create_following_trajectory(state, trajectories_full, fallback_ds=0.5):
+    if trajectories_full:
+        template_trajectory = trajectories_full[0][0]
+    else:
+        # No successful A* trajectory exists — build a straight-ahead fallback
+        # that ends at the ACTUAL scenario goal, not an arbitrary fixed distance.
+        print("create_following_trajectory: no candidate trajectories available, using goal-anchored straight-line fallback")
+        goal_x = ScenarioParameters.X_LOC_GOAL
+        goal_y = ScenarioParameters.Y_LOC_GOAL
+        remaining_distance = max(goal_y - state.y, fallback_ds * 2)  # ensure at least 2 points
+        num_points = int(remaining_distance / fallback_ds) + 1
+
+        # Straight line from current position toward the goal's x, ending at goal's y
+        xs = np.linspace(state.x, goal_x, num_points)
+        ys = state.y + np.arange(num_points) * fallback_ds
+        thetas = np.full(num_points, state.yaw)
+        template_trajectory = np.column_stack([xs, ys, thetas])
+
+    resampled_trajectory = compute_predicted_trajectory(state, template_trajectory)
     completion_time = calculate_trajectory_completion_time(resampled_trajectory, state)
     # Get initial values
     init_x = resampled_trajectory[0, 0]  # Initial x value
@@ -1257,7 +1327,7 @@ def evaluate_trajectories_for_reasons(trajectories_full, moving_obstacles, state
         if i == len(trajectories_full) - 1:
             resampled_trajectory = compute_predicted_trajectory(state, trajectory[0],last_index=True)
             # set completion time as the real completion time from other trajectories
-            # completion_time = calculate_trajectory_completion_time(resampled_trajectory, state, last_index=True)
+            completion_time = calculate_trajectory_completion_time(resampled_trajectory, state, last_index=True)
         else:
             resampled_trajectory = compute_predicted_trajectory(state, trajectory[0])
             completion_time = calculate_trajectory_completion_time(resampled_trajectory, state)
@@ -1980,15 +2050,27 @@ def initialize_simulation() -> tuple:
     scenario_visualization = arterial.create_scenario(frame_visualization=True)
 
     # Define moving obstacles via a config list — add/remove/edit agents here.
+    INCLUDE_ONCOMING_CAR = False  # toggle the oncoming car agent on/off
+    ONCOMING_CAR_SPEED = 2.0  # m/s (~29 km/h) — change this to test different responses
+
     AGENT_CONFIGS = [
         {
             "name": "cyclist",
             "x_buffer": ScenarioParameters.X_LOC_CYCLIST_BUFFER,
             "y_buffer": ScenarioParameters.Y_LOC_CYCLIST_BUFFER,
             "speed": CyclistParameters.SPEED,
-            "heading": np.pi / 2,  # same direction as ego
+            "heading": np.pi / 2,
         },
     ]
+
+    if INCLUDE_ONCOMING_CAR:
+        AGENT_CONFIGS.append({
+            "name": "oncoming_car",
+            "x_buffer": -4.0,   # opposite lane (mirrors ego's +2.0 lane position)
+            "y_buffer": ScenarioParameters.Y_LOC_CYCLIST_BUFFER + 30.0,  # 30m past the cyclist, approaching
+            "speed": ONCOMING_CAR_SPEED,
+            "heading": -np.pi / 2,  # facing/driving toward the ego (downward)
+        })
 
     moving_obstacles = []
     for cfg in AGENT_CONFIGS:
@@ -2149,7 +2231,6 @@ def plot_scenario_with_car(scenario, car_state, car_dimensions, ax):
     plt.ylabel('Y')
     plt.axis('equal')
     plt.grid(True)
-    plt.show()
 
 def plot_deviation(ax,time_values,  xref_deviation_value):
     fontsize = 25

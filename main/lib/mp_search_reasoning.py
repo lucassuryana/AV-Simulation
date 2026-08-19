@@ -210,7 +210,10 @@ class MotionPrimitiveSearch:
 
     def run(self, debug=False):
         cost, path = self._a_star.run(self._start, is_goal_function=self.is_goal,
-                                      heuristic_function=self.heuristicCost, debug=debug)
+                                    heuristic_function=self.heuristicCost, debug=debug)
+        if not path:
+            # A* hit the iteration cap with no feasible path found — fail gracefully.
+            return float('inf'), [], None
         trajectory = self.path_to_full_trajectory(path)
         return cost, path, trajectory
 
@@ -276,6 +279,12 @@ class MotionPrimitiveSearch:
             
             # Run A* with current weights
             cost, path, trajectory = self.run(debug=debug)
+
+            if trajectory is None:
+                # This weighting found no feasible overtake — skip it, don't crash.
+                print(f"{priority_name}: no feasible trajectory found (skipped)")
+                continue
+
             trajectories.append((trajectory, (wh_ego, wh_policy, wh_rUser1, wh_rUser2, wh_rUser3)))
             costs.append(cost)
             paths.append(path)
