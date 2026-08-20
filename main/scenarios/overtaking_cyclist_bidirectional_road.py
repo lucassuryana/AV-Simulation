@@ -340,6 +340,43 @@ def gate_replan_request(replan_needed, collision_hold_active, pending_replan_req
     return execute_replan, pending_replan_request
 
 
+def filter_safe_trajectories(trajectories_full, is_unsafe_fn, log_fn=None):
+    """
+    Step 4: hard pass/fail safety filter, applied before any soft scoring. Excludes
+    every candidate for which is_unsafe_fn(index, trajectory) is True (i.e. it
+    intersects some moving obstacle's predicted envelope within the horizon). If
+    that leaves nothing, falls back to the last candidate — perform_replan always
+    appends the implicit follow_trajectory (stay-behind) option last — rather than
+    failing.
+
+    is_unsafe_fn receives the candidate's index in the *original* trajectories_full
+    so callers can special-case the last entry the same way the scoring code below
+    already does (follow_trajectory is meant to be driven at the current speed, not
+    resampled as if accelerating toward max speed like every other candidate).
+
+    Returns:
+        The filtered candidate list (same element type/order as trajectories_full).
+    """
+    def log(msg):
+        if log_fn is not None:
+            log_fn(msg)
+
+    if not trajectories_full:
+        return trajectories_full
+
+    safe_trajectories_full = [t for i, t in enumerate(trajectories_full) if not is_unsafe_fn(i, t)]
+
+    num_excluded = len(trajectories_full) - len(safe_trajectories_full)
+    if num_excluded > 0:
+        log(f"Safety filter: excluded {num_excluded} of {len(trajectories_full)} candidates")
+
+    if safe_trajectories_full:
+        return safe_trajectories_full
+
+    log("Safety filter excluded all candidates — falling back to follow_trajectory")
+    return [trajectories_full[-1]]
+
+
 def compute_predicted_trajectory(state, trajectory_res, last_index=None):
     """
     Compute the predicted trajectory for the car based on its current speed and maximum acceleration.
@@ -474,9 +511,15 @@ def perform_replan(arterial, car_dimensions, bicycle_dimensions, dl, moving_obst
         reasons_cyclist_comfort,
         reasons_driver_time_eff,
         reasons_policymaker_reg_compliance,
+        trajs_moving_obstacles=trajs_moving_obstacles,
         time_elapsed_driver=time_elapsed_driver,
         time_passed_cyclist=time_passed_cyclist
     )
+
+    # Step 4: evaluate_trajectories_for_reasons may have safety-filtered the candidate
+    # list; eval_results['best_idx'] and ['all_evaluations'] are indexed against that
+    # filtered list, so this local variable must be replaced with it, not just read from.
+    trajectories_full = eval_results['trajectories_full']
 
     # In perform_replan after evaluation
     if vis_frame == True:
@@ -1354,20 +1397,46 @@ def balance_function(weights, ideal_weights=None):
 def evaluate_trajectories_for_reasons(trajectories_full, moving_obstacles, state, car_dimensions, bicycle_dimensions,
                                       reasons_cyclist_comfort, reasons_driver_time_eff,
                                       reasons_policymaker_reg_compliance,
+                                      trajs_moving_obstacles=None,
                                       time_elapsed_driver=0.0, time_passed_cyclist=0.0):
     """
     Evaluate multiple trajectories based on human-centered reasons.
 
     Args:
         trajectories_full: List of candidate trajectories
-        moving_obstacles: List of moving obstacles (bicycle)
+        moving_obstacles: List of moving obstacles (bicycle, oncoming car, ...)
         state: Current state of the vehicle
         car_dimensions: Dimensions of the car
         bicycle_dimensions: Dimensions of the bicycle
+        trajs_moving_obstacles: Predicted trajectories of every moving obstacle over the
+            prediction horizon (same shape as used by the reactive collision-avoidance
+            check). Used for the hard safety filter below; if None, the filter is skipped.
 
     Returns:
         dict: Evaluation results with scores and best trajectory
     """
+    # Step 4: hard safety filter, run before any scoring. A candidate that intersects
+    # ANY moving obstacle's predicted envelope within the horizon is excluded outright —
+    # this is a pass/fail gate, separate from (and prior to) the soft reasons-scoring
+    # below, which only judges comfort/preference among already-safe candidates.
+    if trajs_moving_obstacles is not None:
+        num_candidates = len(trajectories_full)
+
+        def _is_unsafe(index, trajectory):
+            candidate = trajectory[0]
+            # Match the scoring loop below: the last candidate is always the implicit
+            # follow_trajectory, meant to be driven at the current speed, not resampled
+            # as if accelerating toward max speed like a real maneuver candidate.
+            is_last = index == num_candidates - 1
+            resampled_candidate = compute_predicted_trajectory(state, candidate, last_index=True if is_last else None)
+            collision = check_collision_moving_bicycle(
+                car_dimensions, bicycle_dimensions, resampled_candidate, candidate,
+                trajs_moving_obstacles, frame_window=MPCParameters.FRAME_WINDOW
+            )
+            return collision is not None
+
+        trajectories_full = filter_safe_trajectories(trajectories_full, _is_unsafe, log_fn=logger.info)
+
     trajectory_scores = []
     detailed_evaluations = []
 
@@ -1545,7 +1614,10 @@ def evaluate_trajectories_for_reasons(trajectories_full, moving_obstacles, state
         'best_idx': best_idx,
         'best_trajectory': best_trajectory,
         'best_evaluation': best_evaluation,
-        'all_evaluations': detailed_evaluations
+        'all_evaluations': detailed_evaluations,
+        # Step 4: the post-safety-filter candidate list — callers must use this (not
+        # their own pre-filter copy) so best_idx and detailed_evaluations line up.
+        'trajectories_full': trajectories_full
     }
 
 
