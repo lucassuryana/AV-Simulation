@@ -105,6 +105,7 @@ def main(replanner: bool = False, vis_frame: bool = False, save_weight_table: bo
     tmp_trajectory = None
     collision_hold_active = False
     distance_history = deque(maxlen=STABILITY_WINDOW)
+    pending_replan_request = False  # Step 3: a replan that was needed but held by an active collision override
 
     loop_runtimes = []
 
@@ -166,8 +167,19 @@ def main(replanner: bool = False, vis_frame: bool = False, save_weight_table: bo
             replan_needed, replan_tracker = reasons_evaluation(reasons_cyclist_comfort, reasons_driver_time_eff,
                                                reasons_policymaker_reg_compliance, replan_needed, replan_tracker)
 
-            # Execute replan only if reasons value drop below ScenarioParameters.REASONS_THRESHOLD was detected
-            if replan_needed:
+            # Step 3: gate the request on collision-avoidance state, queuing rather than dropping it
+            # if an override is active; release/re-validate it once the override clears.
+            reasons_below_threshold = any(
+                value < ReasonParameters.REASONS_THRESHOLD
+                for value in (reasons_cyclist_comfort, reasons_driver_time_eff, reasons_policymaker_reg_compliance)
+            )
+            execute_replan, pending_replan_request = gate_replan_request(
+                replan_needed, collision_hold_active, pending_replan_request, reasons_below_threshold,
+                log_fn=lambda msg: logger.info(f"t={i * ScenarioParameters.DT:.2f}s {msg}")
+            )
+
+            # Execute replan only if the gate above cleared it
+            if execute_replan:
                 # Perform replan, reset the trajectory, MPC, and collision status
                 IS_FOLLOWING = False
                 # change max_speed of the MPC to 30/3.6
@@ -287,6 +299,45 @@ def is_steady_following(distance_history, ego_speed, obstacle_speed,
     speed_converged = abs(ego_speed - obstacle_speed) < speed_eps
 
     return distance_non_decreasing and speed_converged
+
+
+def gate_replan_request(replan_needed, collision_hold_active, pending_replan_request,
+                        reasons_below_threshold, log_fn=None):
+    """
+    Step 3: decide whether a reasons-triggered replan executes now, gets held
+    behind an active collision-avoidance override, or — having been held —
+    is released or dropped once the override clears.
+
+    A freshly triggered replan (replan_needed=True) executes immediately unless
+    collision avoidance is actively closing on an obstacle, in which case it's
+    queued via pending_replan_request instead of dropped. Once the override
+    clears, any pending request is re-validated against reasons_below_threshold
+    (the *current* reasons, not stale ones from when it was first requested)
+    before executing.
+
+    Returns:
+        (execute_replan, pending_replan_request)
+    """
+    def log(msg):
+        if log_fn is not None:
+            log_fn(msg)
+
+    if replan_needed:
+        log("replan requested")
+        if collision_hold_active:
+            pending_replan_request = True
+            log("replan held — collision active")
+
+    if pending_replan_request and not collision_hold_active:
+        pending_replan_request = False
+        if reasons_below_threshold:
+            replan_needed = True
+            log("replan executed on release")
+        else:
+            log("replan held request dropped — reasons recovered")
+
+    execute_replan = replan_needed and not collision_hold_active
+    return execute_replan, pending_replan_request
 
 
 def compute_predicted_trajectory(state, trajectory_res, last_index=None):
