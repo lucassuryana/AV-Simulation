@@ -546,7 +546,10 @@ def perform_replan(arterial, car_dimensions, bicycle_dimensions, dl, moving_obst
         cx=trajectory_full[:, 0],
         cy=trajectory_full[:, 1],
         cyaw=trajectory_full[:, 2],
-        dl=dl, speed=max_speed, dt=ScenarioParameters.DT, car_dimensions=car_dimensions
+        dl=dl, speed=max_speed, dt=ScenarioParameters.DT, car_dimensions=car_dimensions,
+        # The selected trajectory may be a short intermediate one (e.g. follow_trajectory) —
+        # is_goal() must still check against the scenario's real destination, not its endpoint.
+        goal=(ScenarioParameters.X_LOC_EGO, ScenarioParameters.Y_LOC_GOAL)
     )
     collision_xy = None  # Reset collision tracker
 
@@ -2221,7 +2224,8 @@ def initialize_mpc(trajectory_full, car_dimensions, max_speed) -> tuple:
         tuple: A tuple containing the MPC object, the initial state and the distance between the points in the trajectory.
     """
     dl = np.linalg.norm(trajectory_full[0, :2] - trajectory_full[1, :2])
-    mpc = MPC(cx=trajectory_full[:, 0], cy=trajectory_full[:, 1], cyaw=trajectory_full[:, 2], dl=dl, dt=ScenarioParameters.DT, car_dimensions=car_dimensions, speed=max_speed)
+    mpc = MPC(cx=trajectory_full[:, 0], cy=trajectory_full[:, 1], cyaw=trajectory_full[:, 2], dl=dl, dt=ScenarioParameters.DT, car_dimensions=car_dimensions, speed=max_speed,
+              goal=(ScenarioParameters.X_LOC_EGO, ScenarioParameters.Y_LOC_GOAL))
     state = State(x=trajectory_full[0, 0], y=trajectory_full[0, 1], yaw=trajectory_full[0, 2], v=CyclistParameters.SPEED)
     return mpc, state, dl
 

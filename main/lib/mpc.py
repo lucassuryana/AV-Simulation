@@ -241,7 +241,7 @@ def _iterative_linear_mpc_control(x0, oa, od, state, cx, cy, cyaw, dl, dt, targe
 
 class MPC:
     def __init__(self, cx: np.ndarray, cy: np.ndarray, cyaw: np.ndarray, dl: float, car_dimensions: CarDimensions,
-                 speed: float = 30/3.6, dt: float = 0.2):
+                 speed: float = 30/3.6, dt: float = 0.2, goal: Optional[Tuple[float, float]] = None):
         """
         Simulation
         cx: course x position list
@@ -249,6 +249,12 @@ class MPC:
         cyaw: course yaw position list
         dl: course tick [m]
         dt: delta time [s]
+        goal: (x, y) is_goal() is checked against. Defaults to the last point of
+            cx/cy — correct only when this trajectory actually ends at the true
+            destination. Callers that reinitialize the MPC around a shorter,
+            intermediate trajectory (e.g. a stay-behind fallback) must pass the
+            real destination explicitly, or is_goal() will fire at that
+            trajectory's own endpoint instead.
         """
 
         self.cx = cx
@@ -261,7 +267,7 @@ class MPC:
         self.car_dimensions = car_dimensions
         self.speed = speed
 
-        self.goal: Tuple[float, float] = cx[-1], cy[-1]
+        self.goal: Tuple[float, float] = goal if goal is not None else (cx[-1], cy[-1])
 
         self.target_ind: int = 0
 
