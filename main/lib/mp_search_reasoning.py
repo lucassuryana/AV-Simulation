@@ -211,8 +211,12 @@ class MotionPrimitiveSearch:
     def run(self, debug=False):
         cost, path = self._a_star.run(self._start, is_goal_function=self.is_goal,
                                     heuristic_function=self.heuristicCost, debug=debug)
-        if not path:
-            # A* hit the iteration cap with no feasible path found — fail gracefully.
+        if len(path) < 2:
+            # Either no feasible path was found, or is_goal(start) was already True (the
+            # goal area is a box sized to the car, not a point, so this happens whenever
+            # the start position already falls inside it) — path_to_full_trajectory needs
+            # at least one edge between two nodes and can't build anything from a single
+            # node. Either way, fail gracefully rather than crash on an empty concatenate.
             return float('inf'), [], None
         trajectory = self.path_to_full_trajectory(path)
         return cost, path, trajectory
