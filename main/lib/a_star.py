@@ -29,18 +29,24 @@ class AStar(Generic[TNode]):
         return self._debug_data
 
     def run(self, start: TNode, is_goal_function: Callable[[TNode], bool],
-            heuristic_function: Callable[[TNode], float],
-            debug=False) -> Tuple[float, List[TNode]]:
-        q: List[Tuple[float, float, TNode, TNode]] = [(0, 0, start, start)]  # G + H value, G value, node, predecessor
+        heuristic_function: Callable[[TNode], float],
+        debug=False, max_iterations: int = 50000) -> Tuple[float, List[TNode]]: 
+        q: List[Tuple[float, float, TNode, TNode]] = [(0, 0, start, start)]
 
         if debug:
             self._debug_data = []
 
-        # best predecessor dict
         pred_dict: Dict[TNode, Tuple[float, TNode]] = {}
+        iterations = 0
 
         while q:
+            iterations += 1
+            if iterations > max_iterations:
+                # No feasible path found within the search budget — fail gracefully.
+                return float('inf'), []
+
             gh, g, node, predecessor = heappop(q)
+            ... # rest unchanged
 
             if node in pred_dict and g >= pred_dict[node][0]:
                 # we have seen this node before -> skip

@@ -124,23 +124,25 @@ class MovingObstacleRoundabout:
         return self.model.xc, self.model.yc, self.forward_velocity, self.model.theta, acceleration, self.steering_angle
 
 class MovingObstacleArterial:
-    def __init__(self, car_dimensions: CarDimensions, x_init: float, y_init: float, speed: float, initial_speed: float, offset=None, dt=10e-3):
+    def __init__(self, car_dimensions: CarDimensions, x_init: float, y_init: float, speed: float, initial_speed: float, offset=None, dt=10e-3, heading: float = np.pi / 2):
         """
-        Function that creates moving obstacles that only go up
+        Function that creates moving obstacles that travel in a straight line
         :param car_dimensions:
         :param speed: sets the forward speed and is not bounded
         :param offset: sets the time in seconds it should start moving after the start of the simulation. None or 0 for no offset
         :param dt: the dt used in the simulator. !WARNING! is 10e-3 in the Bicycle model
+        :param heading: initial heading angle in radians. np.pi/2 = facing up (default, same-direction traffic).
+                         -np.pi/2 = facing down (oncoming traffic).
         """
         self.speed = speed
         self.initial_speed = initial_speed
         self.model = Bicycle(car_dimensions=car_dimensions, sample_time=dt)
-        self.offset = None if offset is None else offset if offset > 0 else None  # None except if offset > 0
+        self.offset = None if offset is None else offset if offset > 0 else None
         self.dt = dt
         self.counter = 0
         self.model.xc = x_init
         self.model.yc = y_init
-        self.model.theta = np.pi / 2  # Facing up
+        self.model.theta = heading  # Facing direction (default: up)
 
     @property
     def steering_angle(self) -> float:
