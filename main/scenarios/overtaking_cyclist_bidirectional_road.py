@@ -8,7 +8,7 @@ import subprocess
 import sys
 import time
 from collections import deque
-from typing import List
+from typing import List, Tuple
 
 # Third-party libraries
 import matplotlib.gridspec as gridspec
@@ -25,7 +25,7 @@ from lib.motion_primitive import load_motion_primitives
 from lib.mp_search_reasoning import MotionPrimitiveSearch
 from lib.moving_obstacles import MovingObstacleArterial
 from lib.moving_obstacles_prediction import MovingObstaclesPrediction
-from lib.mpc import MPC, MAX_ACCEL
+from lib.mpc import MPC, MAX_ACCEL, MAX_DECEL
 from lib.plotting import draw_car, draw_bicycle, draw_astar_search_points
 from lib.reasons_evaluation import evaluate_distance_to_centerline, evaluate_distance_to_obstacle, evaluate_time_following
 from lib.simulation import History, HistorySimulation, Simulation, State
@@ -40,9 +40,18 @@ logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)  # this script's own logger only — keeps third-party libs (matplotlib, cvxpy) at INFO
 
 # Step 2: steady-state following detection
-STABILITY_WINDOW = 5          # consecutive frames to confirm steady state
+STABILITY_WINDOW = 10          # consecutive frames to confirm steady state
 DISTANCE_STABLE_EPS = 0.05    # meters — distance change below this counts as "not decreasing"
 SPEED_CONVERGENCE_EPS = 0.3   # m/s — ego/obstacle speed difference below this counts as "converged"
+
+# Step 7 (scoped): retry a safety-blocked replan, and avoid stalling when a
+# short-term trajectory (e.g. follow_trajectory) runs out.
+SAFETY_RETRY_INTERVAL = 2.0     # seconds between retry attempts after a safety-filtered fallback
+TRAJECTORY_EXHAUSTION_MARGIN = 10  # points remaining before proactively replanning
+# Meters from the true destination within which we stop proactively replanning —
+# generously larger than the goal box (sized to the car) that MotionPrimitiveSearch's
+# is_goal() checks against, so a proactive replan never starts from inside it.
+GOAL_PROXIMITY_SUPPRESS_REPLAN = 5.0
 
 def main(replanner: bool = False, vis_frame: bool = False, save_weight_table: bool = False, historical_plot: bool = False) -> None:
     """
@@ -82,7 +91,8 @@ def main(replanner: bool = False, vis_frame: bool = False, save_weight_table: bo
             os.remove(os.path.join(save_folder, file))
 
     # Initialize simulation
-    mps, car_dimensions, bicycle_dimensions, arterial, scenario_no_obstacles, scenario_visualization, moving_obstacles = initialize_simulation()
+    (mps, car_dimensions, bicycle_dimensions, arterial, scenario_no_obstacles, scenario_visualization,
+     moving_obstacles, moving_obstacle_dimensions) = initialize_simulation()
 
     # Run motion primitive search
     cost, path, trajectory_full, search_runtime = run_motion_primitive_search(scenario_no_obstacles, car_dimensions,
@@ -106,6 +116,8 @@ def main(replanner: bool = False, vis_frame: bool = False, save_weight_table: bo
     collision_hold_active = False
     distance_history = deque(maxlen=STABILITY_WINDOW)
     pending_replan_request = False  # Step 3: a replan that was needed but held by an active collision override
+    last_replan_was_fallback = False  # Step 7 (scoped): last replan was constrained by the safety filter
+    last_replan_time = None           # Step 7 (scoped): sim time of the last executed replan, for the retry cooldown
 
     loop_runtimes = []
 
@@ -129,29 +141,49 @@ def main(replanner: bool = False, vis_frame: bool = False, save_weight_table: bo
 
         # Predict the movement of each moving obstacle, and retrieve the predicted trajectories
         trajs_moving_obstacles = [
-            np.vstack(MovingObstaclesPrediction(*o.get(), sample_time=ScenarioParameters.DT, car_dimensions=bicycle_dimensions)
+            np.vstack(MovingObstaclesPrediction(*o.get(), sample_time=ScenarioParameters.DT, car_dimensions=dims)
                       .state_prediction(MPCParameters.TIME_HORIZON)).T
-            for o in moving_obstacles]
+            for o, dims in zip(moving_obstacles, moving_obstacle_dimensions)]
 
         # Evaluate reasons
         reasons_policymaker_reg_compliance, reasons_driver_time_eff, reasons_cyclist_comfort, TIME_ELAPSED_DRIVER, TIME_PASSED_CYCLIST = evaluate_reasons(
             state, moving_obstacles, car_dimensions, TIME_ELAPSED_DRIVER, TIME_PASSED_CYCLIST)
 
-        # Find the collision location
-        collision_xy = check_collision_moving_bicycle(car_dimensions, bicycle_dimensions, trajectory_res, trajectory,
-                                                      trajs_moving_obstacles,
-                                                      frame_window=MPCParameters.FRAME_WINDOW)
+        # Find the collision location — each obstacle checked against its own size
+        collision_xy = check_collision_moving_multi(car_dimensions, moving_obstacle_dimensions, trajectory_res,
+                                                     trajectory, trajs_moving_obstacles, state,
+                                                     frame_window=MPCParameters.FRAME_WINDOW)
 
-        # --- Step 2: distinguish "actively closing" from "steady following" ---
+        # Safety-net check: log if any obstacle is ever actually within collision distance,
+        # regardless of what the hold logic below decided — this should never fire.
+        for obs_idx, (o, dims) in enumerate(zip(moving_obstacles, moving_obstacle_dimensions)):
+            ox, oy = o.get()[0], o.get()[1]
+            d = math.hypot(state.x - ox, state.y - oy)
+            min_d = car_dimensions.radius + dims.radius
+            if d <= min_d:
+                logger.warning(f"REAL_COLLISION t={i*ScenarioParameters.DT:.2f}s obs{obs_idx} dist={d:.2f} "
+                               f"min_d={min_d:.2f} state=({state.x:.2f},{state.y:.2f}) v={state.v:.2f}")
+
+        # --- Step 2: distinguish "actively closing" from "cleared/steady" ---
         if collision_xy is not None:
-            obstacle_x, obstacle_y, obstacle_v, _, _, _ = moving_obstacles[0].get()
+            # collision_xy[2] identifies which obstacle actually triggered this — using it
+            # (rather than always moving_obstacles[0], the cyclist) matters because an
+            # oncoming car needs different release semantics than something to be paced
+            # behind: is_steady_following's "speeds converged" can never be satisfied by
+            # traffic moving the other way, which otherwise deadlocks the hold indefinitely
+            # even after the hazard has actually passed.
+            triggering_obstacle_idx = collision_xy[2]
+            obstacle_x, obstacle_y, obstacle_v, obstacle_yaw, _, _ = moving_obstacles[triggering_obstacle_idx].get()
             current_distance = math.hypot(state.x - obstacle_x, state.y - obstacle_y)
             distance_history.append(current_distance)
 
-            steady = is_steady_following(distance_history, state.v, obstacle_v)
+            if is_opposing_traffic(obstacle_yaw, state.yaw):
+                steady = is_hazard_cleared(distance_history)
+            else:
+                steady = is_steady_following(distance_history, state.v, obstacle_v)
             collision_hold_active = not steady
 
-            logger.debug(f"t={i*ScenarioParameters.DT:.2f}s dist={current_distance:.2f} "
+            logger.debug(f"t={i*ScenarioParameters.DT:.2f}s obs={triggering_obstacle_idx} dist={current_distance:.2f} "
                          f"ego_v={state.v:.2f} obs_v={obstacle_v:.2f} "
                          f"steady={steady} hold_active={collision_hold_active}")
         else:
@@ -167,12 +199,44 @@ def main(replanner: bool = False, vis_frame: bool = False, save_weight_table: bo
             replan_needed, replan_tracker = reasons_evaluation(reasons_cyclist_comfort, reasons_driver_time_eff,
                                                reasons_policymaker_reg_compliance, replan_needed, replan_tracker)
 
-            # Step 3: gate the request on collision-avoidance state, queuing rather than dropping it
-            # if an override is active; release/re-validate it once the override clears.
             reasons_below_threshold = any(
                 value < ReasonParameters.REASONS_THRESHOLD
                 for value in (reasons_cyclist_comfort, reasons_driver_time_eff, reasons_policymaker_reg_compliance)
             )
+
+            # Step 7 (scoped): once genuinely near the real destination, proactive replanning
+            # has nothing left to accomplish and actively risks the degenerate single-node-path
+            # case in MotionPrimitiveSearch (its is_goal() box can already be satisfied at the
+            # start). Suppress both proactive triggers below in that case — the reasons-based
+            # trigger above is untouched, since a genuine safety/comfort concern still matters.
+            near_true_goal = is_near_true_goal(state.x, state.y, ScenarioParameters.X_LOC_EGO, ScenarioParameters.Y_LOC_GOAL)
+            if i % 10 == 0:
+                logger.info(f"DEBUG_GOAL: t={i * ScenarioParameters.DT:.2f}s state=({state.x:.2f},{state.y:.2f}) "
+                            f"v={state.v:.2f} dist_to_goal={math.hypot(state.x - ScenarioParameters.X_LOC_EGO, state.y - ScenarioParameters.Y_LOC_GOAL):.2f} "
+                            f"near_true_goal={near_true_goal} is_goal={mpc.is_goal(state)}")
+
+            # Step 7 (scoped): reasons_evaluation's replan_tracker is edge-triggered and won't
+            # re-fire while the same reason stays below threshold — which it usually does once
+            # the AV is deliberately trailing the obstacle it's uncomfortable near. Retry
+            # periodically if the last replan was constrained by the safety filter and the
+            # reason is still bad, so a temporarily-blocked maneuver (e.g. an overtake blocked
+            # by an oncoming car) gets re-attempted once conditions might have changed.
+            time_since_last_replan = (i * ScenarioParameters.DT - last_replan_time) if last_replan_time is not None else float('inf')
+            retry_needed = should_retry_after_fallback(last_replan_was_fallback, reasons_below_threshold, time_since_last_replan)
+            if retry_needed and not replan_needed and not near_true_goal:
+                logger.info(f"t={i * ScenarioParameters.DT:.2f}s retrying replan — previous attempt was safety-constrained")
+                replan_needed = True
+
+            # Step 7 (scoped): proactively replan before running out of the current trajectory —
+            # follow_trajectory doesn't reach the real destination, and without this the AV
+            # reaches its last point and stalls with nothing left to track.
+            exhaustion_needed = is_trajectory_nearly_exhausted(traj_agent_idx, len(trajectory_full))
+            if exhaustion_needed and not replan_needed and not near_true_goal:
+                logger.info(f"t={i * ScenarioParameters.DT:.2f}s replanning — current trajectory nearly exhausted")
+                replan_needed = True
+
+            # Step 3: gate the request on collision-avoidance state, queuing rather than dropping it
+            # if an override is active; release/re-validate it once the override clears.
             execute_replan, pending_replan_request = gate_replan_request(
                 replan_needed, collision_hold_active, pending_replan_request, reasons_below_threshold,
                 log_fn=lambda msg: logger.info(f"t={i * ScenarioParameters.DT:.2f}s {msg}")
@@ -190,6 +254,7 @@ def main(replanner: bool = False, vis_frame: bool = False, save_weight_table: bo
                             reasons_cyclist_values, reasons_driver_values, reasons_policymaker_values,
                             time_values,
                             max_speed=MPCParameters.MAX_SPEED_FREEWAY,
+                            moving_obstacle_dimensions=moving_obstacle_dimensions,
                             is_following=IS_FOLLOWING,
                             vis_frame=vis_frame,
                             save_weight_table=save_weight_table,
@@ -202,6 +267,11 @@ def main(replanner: bool = False, vis_frame: bool = False, save_weight_table: bo
                 # exists on the new curve. hold_active above was already computed against the
                 # pre-replan physical distance/speed, so it's unaffected by this overwrite.
                 distance_history.clear()
+
+                # Step 7 (scoped): remember whether this outcome was safety-constrained, and when
+                # it happened, so should_retry_after_fallback can decide about the next attempt.
+                last_replan_was_fallback = bool(scenario.trajectory_evaluation.get('safety_filter_excluded', False))
+                last_replan_time = i * ScenarioParameters.DT
 
         # Cut off the trajectory before a collision occurs, with an additional margin
         if collision_xy is not None:
@@ -260,6 +330,43 @@ def main(replanner: bool = False, vis_frame: bool = False, save_weight_table: bo
     plot_trajectories(obstacles_positions, simulation.history)
 
 
+def check_collision_moving_multi(car_dimensions, moving_obstacle_dimensions, traj_agent, path_agent_detailed,
+                                 trajs_moving_obstacles, state, frame_window=0):
+    """
+    check_collision_moving_bicycle takes one shared `bicycle_dimensions` for every obstacle
+    in trajs_moving_obstacles, computing min_distance = car_dimensions.radius +
+    bicycle_dimensions.radius for all of them alike. That's wrong once obstacles have
+    different real sizes (e.g. a car-sized oncoming vehicle vs. a bicycle) — it understates
+    the safety margin against the larger one. This calls the check once per obstacle with
+    its own dimensions instead, and returns whichever resulting collision point is nearest
+    to the ego's current position (i.e. the more urgent hazard), or None if none collide.
+
+    Returns (x, y, obstacle_index) — obstacle_index identifies which entry in
+    moving_obstacle_dimensions/moving_obstacles triggered it, so callers can look up that
+    obstacle's own state (e.g. to decide hold-release semantics) instead of assuming it's
+    always the same one.
+    """
+    nearest_xy = None
+    nearest_dist = None
+    nearest_idx = None
+    for idx, (obstacle_dims, traj_obstacle) in enumerate(zip(moving_obstacle_dimensions, trajs_moving_obstacles)):
+        collision = check_collision_moving_bicycle(
+            car_dimensions, obstacle_dims, traj_agent, path_agent_detailed,
+            [traj_obstacle], frame_window=frame_window
+        )
+        if collision is None:
+            continue
+        x, y = collision[0], collision[1]
+        dist = math.hypot(state.x - x, state.y - y)
+        if nearest_dist is None or dist < nearest_dist:
+            nearest_dist = dist
+            nearest_xy = (x, y)
+            nearest_idx = idx
+    if nearest_xy is None:
+        return None
+    return nearest_xy[0], nearest_xy[1], nearest_idx
+
+
 def cutoff_trajectory_before_collision(EXTRA_CUTOFF_MARGIN, collision_xy, traj_agent_idx,
                                        trajectory_full) -> np.ndarray:
     """
@@ -299,6 +406,33 @@ def is_steady_following(distance_history, ego_speed, obstacle_speed,
     speed_converged = abs(ego_speed - obstacle_speed) < speed_eps
 
     return distance_non_decreasing and speed_converged
+
+
+def is_opposing_traffic(obstacle_heading, ego_heading, angle_threshold=math.pi / 2):
+    """
+    True if the obstacle is heading roughly opposite the ego (oncoming/crossing traffic)
+    rather than travelling the same general direction as something to be paced behind
+    (like the cyclist). Used to pick the right collision-hold release semantics below:
+    is_steady_following's "speeds converged" condition assumes the ego and obstacle can
+    settle into a shared pace, which opposing traffic — moving the other way — can never
+    satisfy, so applying it there deadlocks the hold indefinitely.
+    """
+    diff = abs((obstacle_heading - ego_heading + math.pi) % (2 * math.pi) - math.pi)
+    return diff > angle_threshold
+
+
+def is_hazard_cleared(distance_history, distance_eps=DISTANCE_STABLE_EPS):
+    """
+    Release condition for opposing/crossing traffic: the distance to it has been
+    non-decreasing across the window — i.e. it has passed and is moving away — without
+    requiring speed convergence (is_steady_following's condition), which is the wrong
+    test for an obstacle moving the other direction and would never release the hold.
+    """
+    if len(distance_history) < distance_history.maxlen:
+        return False
+
+    deltas = np.diff(distance_history)
+    return np.all(deltas > -distance_eps)
 
 
 def gate_replan_request(replan_needed, collision_hold_active, pending_replan_request,
@@ -377,6 +511,51 @@ def filter_safe_trajectories(trajectories_full, is_unsafe_fn, log_fn=None):
     return [trajectories_full[-1]]
 
 
+def should_retry_after_fallback(last_replan_was_fallback, reasons_below_threshold,
+                                time_since_last_replan, retry_interval=SAFETY_RETRY_INTERVAL):
+    """
+    Step 7 (scoped): decide whether to re-attempt a replan after a previous
+    attempt was constrained by the step-4 safety filter (e.g. an overtake was
+    blocked by an oncoming car, falling back to follow_trajectory).
+
+    reasons_evaluation's replan_tracker is edge-triggered — it only pulses once
+    per below-threshold instance and won't re-fire while the same reason stays
+    bad, which it usually does here (Cyclist Comfort only gets worse the longer
+    the ego deliberately trails the obstacle it's uncomfortable near). Without
+    this, a temporarily-blocked maneuver could never be retried once the
+    blocking hazard clears. This retries periodically instead of every frame,
+    to avoid re-running the full candidate search needlessly.
+    """
+    if not last_replan_was_fallback:
+        return False
+    if not reasons_below_threshold:
+        return False
+    return time_since_last_replan >= retry_interval
+
+
+def is_trajectory_nearly_exhausted(traj_agent_idx, trajectory_len, margin=TRAJECTORY_EXHAUSTION_MARGIN):
+    """
+    Step 7 (scoped): True once fewer than `margin` points remain ahead of the
+    ego on the currently loaded trajectory. A short-term trajectory like
+    follow_trajectory doesn't reach the real destination — without this check,
+    the ego reaches its last point, the MPC has nothing further to track, and
+    the AV stalls permanently short of the goal.
+    """
+    return (trajectory_len - traj_agent_idx) <= margin
+
+
+def is_near_true_goal(ego_x, ego_y, goal_x, goal_y, margin=GOAL_PROXIMITY_SUPPRESS_REPLAN):
+    """
+    Step 7 (scoped): True once the ego is within `margin` of the scenario's real
+    destination. Used to suppress the proactive exhaustion/retry replan triggers
+    once basically there — replanning has nothing left to accomplish that close,
+    and MotionPrimitiveSearch's is_goal() check (a box sized to the car, not a
+    point) can already be satisfied at the start node this close in, which
+    produces a degenerate single-node path with no trajectory to build.
+    """
+    return math.hypot(ego_x - goal_x, ego_y - goal_y) <= margin
+
+
 def compute_predicted_trajectory(state, trajectory_res, last_index=None):
     """
     Compute the predicted trajectory for the car based on its current speed and maximum acceleration.
@@ -427,7 +606,7 @@ def perform_replan(arterial, car_dimensions, bicycle_dimensions, dl, moving_obst
                    trajs_moving_obstacles, scenario_visualization,
                    reasons_cyclist_comfort, reasons_driver_time_eff, reasons_policymaker_reg_compliance,
                    reasons_cyclist_values, reasons_driver_values, reasons_policymaker_values,
-                   time_values, max_speed,
+                   time_values, max_speed, moving_obstacle_dimensions=None,
                    is_following=True, vis_frame=False, save_weight_table=False, time_elapsed_driver=0.0, time_passed_cyclist=0.0):
     """
     Perform a replan based on the current state and moving obstacles.
@@ -512,6 +691,7 @@ def perform_replan(arterial, car_dimensions, bicycle_dimensions, dl, moving_obst
         reasons_driver_time_eff,
         reasons_policymaker_reg_compliance,
         trajs_moving_obstacles=trajs_moving_obstacles,
+        moving_obstacle_dimensions=moving_obstacle_dimensions,
         time_elapsed_driver=time_elapsed_driver,
         time_passed_cyclist=time_passed_cyclist
     )
@@ -882,10 +1062,14 @@ def visualize_trajectory_evaluations(eval_results, trajectories_full, moving_obs
     # Plot car at current state
     car_polygon = draw_car((state.x, state.y, state.yaw), car_dimensions, ax=ax_spatial, color='black')
 
-    # Plot bicycle/moving obstacles
+    # Plot bicycle/moving obstacles — index 0 is always the cyclist (bicycle-sized); any
+    # further obstacle (e.g. an oncoming car) is drawn car-sized instead.
     for i, obstacle in enumerate(moving_obstacles):
         obstacle_x, obstacle_y, _, obstacle_yaw, _, _ = obstacle.get()
-        draw_bicycle((obstacle_x, obstacle_y, obstacle_yaw), bicycle_dimensions, ax=ax_spatial, color='blue')
+        if i == 0:
+            draw_bicycle((obstacle_x, obstacle_y, obstacle_yaw), bicycle_dimensions, ax=ax_spatial, color='blue')
+        else:
+            draw_car((obstacle_x, obstacle_y, obstacle_yaw), car_dimensions, ax=ax_spatial, color='blue')
 
     # Draw all static elements from scenario
     draw_static_elements(ax_spatial, scenario)
@@ -1400,7 +1584,7 @@ def balance_function(weights, ideal_weights=None):
 def evaluate_trajectories_for_reasons(trajectories_full, moving_obstacles, state, car_dimensions, bicycle_dimensions,
                                       reasons_cyclist_comfort, reasons_driver_time_eff,
                                       reasons_policymaker_reg_compliance,
-                                      trajs_moving_obstacles=None,
+                                      trajs_moving_obstacles=None, moving_obstacle_dimensions=None,
                                       time_elapsed_driver=0.0, time_passed_cyclist=0.0):
     """
     Evaluate multiple trajectories based on human-centered reasons.
@@ -1414,6 +1598,9 @@ def evaluate_trajectories_for_reasons(trajectories_full, moving_obstacles, state
         trajs_moving_obstacles: Predicted trajectories of every moving obstacle over the
             prediction horizon (same shape as used by the reactive collision-avoidance
             check). Used for the hard safety filter below; if None, the filter is skipped.
+        moving_obstacle_dimensions: Each obstacle's own size, parallel to trajs_moving_obstacles
+            (e.g. bicycle-sized for the cyclist, car-sized for an oncoming car). Falls back to
+            bicycle_dimensions for every obstacle if not given.
 
     Returns:
         dict: Evaluation results with scores and best trajectory
@@ -1424,6 +1611,9 @@ def evaluate_trajectories_for_reasons(trajectories_full, moving_obstacles, state
     # below, which only judges comfort/preference among already-safe candidates.
     if trajs_moving_obstacles is not None:
         num_candidates = len(trajectories_full)
+        obstacle_dims = moving_obstacle_dimensions
+        if obstacle_dims is None:
+            obstacle_dims = [bicycle_dimensions] * len(trajs_moving_obstacles)
 
         def _is_unsafe(index, trajectory):
             candidate = trajectory[0]
@@ -1432,13 +1622,17 @@ def evaluate_trajectories_for_reasons(trajectories_full, moving_obstacles, state
             # as if accelerating toward max speed like a real maneuver candidate.
             is_last = index == num_candidates - 1
             resampled_candidate = compute_predicted_trajectory(state, candidate, last_index=True if is_last else None)
-            collision = check_collision_moving_bicycle(
-                car_dimensions, bicycle_dimensions, resampled_candidate, candidate,
-                trajs_moving_obstacles, frame_window=MPCParameters.FRAME_WINDOW
+            collision = check_collision_moving_multi(
+                car_dimensions, obstacle_dims, resampled_candidate, candidate,
+                trajs_moving_obstacles, state, frame_window=MPCParameters.FRAME_WINDOW
             )
             return collision is not None
 
+        num_before_filter = len(trajectories_full)
         trajectories_full = filter_safe_trajectories(trajectories_full, _is_unsafe, log_fn=logger.info)
+        safety_filter_excluded = len(trajectories_full) < num_before_filter
+    else:
+        safety_filter_excluded = False
 
     trajectory_scores = []
     detailed_evaluations = []
@@ -1620,7 +1814,11 @@ def evaluate_trajectories_for_reasons(trajectories_full, moving_obstacles, state
         'all_evaluations': detailed_evaluations,
         # Step 4: the post-safety-filter candidate list — callers must use this (not
         # their own pre-filter copy) so best_idx and detailed_evaluations line up.
-        'trajectories_full': trajectories_full
+        'trajectories_full': trajectories_full,
+        # True if the filter excluded at least one candidate this call — i.e. the
+        # selection was constrained by safety, not just preference. Used to decide
+        # whether to retry once conditions might have changed (see should_retry_after_fallback).
+        'safety_filter_excluded': safety_filter_excluded
     }
 
 
@@ -2158,6 +2356,52 @@ def run_motion_primitive_search(scenario_no_obstacles, car_dimensions, mps) -> t
     logger.info(f"Search runtime: {search_runtime}")
     return cost, path, trajectory_full, search_runtime
 
+class MPCDrivenObstacle:
+    """
+    A moving obstacle controlled by its own MPC instance tracking a straight-line
+    reference trajectory in the direction of `heading`, using the same MPC/Simulation
+    machinery the ego vehicle uses — rather than MovingObstacleArterial's fixed speed
+    and hardcoded zero steering angle.
+
+    Exposes the same .get()/.step() interface as MovingObstacleArterial, so it's a
+    drop-in replacement anywhere moving_obstacles are consumed (collision checking,
+    prediction, reasons evaluation, visualization).
+
+    Note: this runs a full MPC optimization every simulation frame, on top of the
+    ego's own — noticeably more expensive per step than the fixed-speed obstacle.
+    """
+
+    def __init__(self, car_dimensions: CarDimensions, x_init: float, y_init: float,
+                speed: float, heading: float, dt: float, trajectory_length: float = 200.0):
+        self.dt = dt
+        self.speed = speed
+
+        # Straight reference course pointed along `heading`, long enough to outlast
+        # the whole scenario so the MPC never runs out of course to track.
+        step_dist = max(speed * dt, 0.05)
+        num_points = int(trajectory_length / step_dist) + 2
+        travel = np.arange(num_points) * step_dist
+        dx, dy = math.cos(heading), math.sin(heading)
+        cx = x_init + travel * dx
+        cy = y_init + travel * dy
+        cyaw = np.full(num_points, heading)
+
+        self.state = State(x=x_init, y=y_init, yaw=heading, v=speed)
+        self.simulation = Simulation(car_dimensions=car_dimensions, sample_time=dt, initial_state=self.state)
+        self.mpc = MPC(cx=cx, cy=cy, cyaw=cyaw, dl=step_dist, dt=dt, car_dimensions=car_dimensions,
+                       speed=speed, goal=(cx[-1], cy[-1]))
+        self._last_delta = 0.0
+        self._last_accel = 0.0
+
+    def step(self):
+        delta, accel = self.mpc.step(self.state)
+        self._last_delta, self._last_accel = delta, accel
+        self.state = self.simulation.step(a=accel, delta=delta)
+
+    def get(self) -> Tuple[float, float, float, float, float, float]:
+        return self.state.x, self.state.y, self.state.v, self.state.yaw, self._last_accel, self._last_delta
+
+
 def initialize_simulation() -> tuple:
     """
     Initialize simulation parameters, motion primitives, and the scenario.
@@ -2176,8 +2420,20 @@ def initialize_simulation() -> tuple:
     scenario_visualization = arterial.create_scenario(frame_visualization=True)
 
     # Define moving obstacles via a config list — add/remove/edit agents here.
-    INCLUDE_ONCOMING_CAR = False  # toggle the oncoming car agent on/off
-    ONCOMING_CAR_SPEED = 2.0  # m/s (~29 km/h) — change this to test different responses
+    INCLUDE_ONCOMING_CAR = True  # toggle the oncoming car agent on/off
+    ONCOMING_CAR_SPEED = 3.0  # m/s (~10.8 km/h) — change this to test different responses
+    ONCOMING_CAR_USE_MPC = False  # toggle the oncoming car's controller: True = its own MPC
+                                   # instance tracks a straight course (like the ego); False =
+                                   # fixed speed with zero steering (MovingObstacleArterial)
+
+    # "Sudden appearance" scenario: the oncoming car sits stationary (initial_speed=0) for
+    # its first ONCOMING_CAR_LAUNCH_DELAY seconds. While stationary, MovingObstaclesPrediction
+    # forecasts it staying put, so it reads as no threat to whatever replan happens before the
+    # delay elapses — then it accelerates to ONCOMING_CAR_SPEED, genuinely outside what that
+    # earlier replan could have predicted. Set the delay to roughly when the reasons-based
+    # replan/overtake is expected to already be underway (watch for "replan requested" in the
+    # logs to find that time for your current settings).
+    ONCOMING_CAR_LAUNCH_DELAY = 6.5  # seconds stationary before launch; None = moves from t=0
 
     AGENT_CONFIGS = [
         {
@@ -2193,24 +2449,42 @@ def initialize_simulation() -> tuple:
         AGENT_CONFIGS.append({
             "name": "oncoming_car",
             "x_buffer": -4.0,   # opposite lane (mirrors ego's +2.0 lane position)
-            "y_buffer": ScenarioParameters.Y_LOC_CYCLIST_BUFFER + 30.0,  # 30m past the cyclist, approaching
+            "y_buffer": ScenarioParameters.Y_LOC_CYCLIST_BUFFER + 30.0,  # past the cyclist, approaching
             "speed": ONCOMING_CAR_SPEED,
             "heading": -np.pi / 2,  # facing/driving toward the ego (downward)
+            "offset": ONCOMING_CAR_LAUNCH_DELAY,
+            "initial_speed": 0.0 if ONCOMING_CAR_LAUNCH_DELAY is not None else ONCOMING_CAR_SPEED,
         })
 
+    # Each obstacle's own physical size for collision-checking/drawing — the oncoming car is
+    # a car, not a bicycle, and using bicycle_dimensions for it (radius ~0.32m vs. a car's
+    # ~1.41m) understates the real safety margin against it by more than half, which is how
+    # the ego was able to actually collide with it instead of just avoiding it.
     moving_obstacles = []
+    moving_obstacle_dimensions = []
     for cfg in AGENT_CONFIGS:
         spawn_location_x = scenario_no_obstacles.start[0] + cfg["x_buffer"]
         spawn_location_y = scenario_no_obstacles.start[1] + cfg["y_buffer"]
-        moving_obstacles.append(
-            MovingObstacleArterial(
-                bicycle_dimensions, spawn_location_x, spawn_location_y,
-                speed=cfg["speed"], initial_speed=cfg["speed"],
-                offset=True, dt=ScenarioParameters.DT, heading=cfg["heading"],
+        obstacle_dimensions = car_dimensions if cfg["name"] == "oncoming_car" else bicycle_dimensions
+        moving_obstacle_dimensions.append(obstacle_dimensions)
+        if cfg["name"] == "oncoming_car" and ONCOMING_CAR_USE_MPC:
+            moving_obstacles.append(
+                MPCDrivenObstacle(
+                    obstacle_dimensions, spawn_location_x, spawn_location_y,
+                    speed=cfg["speed"], heading=cfg["heading"], dt=ScenarioParameters.DT,
+                )
             )
-        )
+        else:
+            moving_obstacles.append(
+                MovingObstacleArterial(
+                    obstacle_dimensions, spawn_location_x, spawn_location_y,
+                    speed=cfg["speed"], initial_speed=cfg.get("initial_speed", cfg["speed"]),
+                    offset=cfg.get("offset"), dt=ScenarioParameters.DT, heading=cfg["heading"],
+                )
+            )
 
-    return mps, car_dimensions, bicycle_dimensions, arterial, scenario_no_obstacles, scenario_visualization, moving_obstacles
+    return (mps, car_dimensions, bicycle_dimensions, arterial, scenario_no_obstacles, scenario_visualization,
+            moving_obstacles, moving_obstacle_dimensions)
 
 def initialize_mpc(trajectory_full, car_dimensions, max_speed) -> tuple:
     """
@@ -2450,13 +2724,18 @@ def plot_historical_data(ax, simulation, mpc, car_dimensions, bicycle_dimensions
             # Label the time step **to the left** of the car
             ax.text(x - 2.0, y + 0.5, f"{plot_time}s", fontsize=12, color='black', ha='center')
 
-        # Plot historical bicycles (moving obstacles)
-        for mo in obstacle_history:
+        # Plot historical obstacles — index 0 is always the cyclist (bicycle-sized); any
+        # further obstacle (e.g. an oncoming car) is drawn car-sized instead.
+        for mo_idx, mo in enumerate(obstacle_history):
             if time_index < len(obstacle_history[mo]):
                 x, y, theta = obstacle_history[mo][time_index]  # Retrieve past position
 
-                draw_bicycle((x, y, theta), bicycle_dimensions, ax=ax,
-                             draw_collision_circles=False, color='blue')
+                if mo_idx == 0:
+                    draw_bicycle((x, y, theta), bicycle_dimensions, ax=ax,
+                                 draw_collision_circles=False, color='blue')
+                else:
+                    draw_car((x, y, theta), car_dimensions=car_dimensions, ax=ax,
+                            draw_collision_circles=False, color='blue')
 
                 # Label the time step **to the right** of the bicycle
                 ax.text(x + 1.5, y + 0.5, f"{plot_time}s", fontsize=12, color='blue', ha='center')
@@ -2467,10 +2746,16 @@ def plot_current_state(ax, state, mpc, car_dimensions, moving_obstacles, bicycle
     draw_car((state.x, state.y, state.yaw), steer=mpc.di, car_dimensions=car_dimensions, ax=ax,
              color='black', draw_collision_circles=False)
 
-    for mo in moving_obstacles:
+    # index 0 is always the cyclist (bicycle-sized); any further obstacle (e.g. an oncoming
+    # car) is drawn car-sized instead.
+    for mo_idx, mo in enumerate(moving_obstacles):
         x, y, _, theta, _, _ = mo.get()  # Get current position
-        draw_bicycle((x, y, theta), bicycle_dimensions, ax=ax,
-                     draw_collision_circles=False, color='blue')
+        if mo_idx == 0:
+            draw_bicycle((x, y, theta), bicycle_dimensions, ax=ax,
+                         draw_collision_circles=False, color='blue')
+        else:
+            draw_car((x, y, theta), car_dimensions=car_dimensions, ax=ax,
+                    draw_collision_circles=False, color='blue')
 
 
 def finalize_plot(ax, simulation, mpc, i, dt):
