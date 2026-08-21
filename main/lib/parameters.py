@@ -34,4 +34,4 @@ class CyclistParameters:
     DISTANCE_REF = 8.0  # Reference distance for cyclist patience
     DISTANCE_BUFFER = 2.0  # Buffer distance for cyclist patience
     TIME_THRESHOLD = 5.0  # Time threshold for cyclist patience
-    SPEED = 5 / 3.6 # Cyclist speed [km/h]
+    SPEED = 7.5 / 3.6 # Cyclist speed [km/h]
