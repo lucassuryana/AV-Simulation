@@ -81,4 +81,9 @@ class AStar(Generic[TNode]):
                     neighbor_gh = neighbor_g + heuristic_function(neighbor)
                     heappush(q, (neighbor_gh, neighbor_g, neighbor, node))
 
-        raise Exception("No solution found.")
+        # Frontier exhausted (every reachable node explored) without ever satisfying
+        # is_goal_function — genuinely no feasible path from here, not a search-budget
+        # timeout. Fail gracefully the same way the max_iterations case above does:
+        # every caller already handles an empty path (or a downstream `not trajectory`)
+        # rather than expecting an exception here.
+        return float('inf'), []

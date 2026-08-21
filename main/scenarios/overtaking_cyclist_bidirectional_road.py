@@ -52,6 +52,12 @@ TRAJECTORY_EXHAUSTION_MARGIN = 10  # points remaining before proactively replann
 # generously larger than the goal box (sized to the car) that MotionPrimitiveSearch's
 # is_goal() checks against, so a proactive replan never starts from inside it.
 GOAL_PROXIMITY_SUPPRESS_REPLAN = 5.0
+# Meters from the true destination within which we stop replanning altogether — even a
+# genuine reasons-triggered replan — once the last replan already ruled overtaking out
+# (fell back to conservative following). Wider than GOAL_PROXIMITY_SUPPRESS_REPLAN:
+# repeated crashes in this near-goal zone (degenerate A* paths, near-zero-speed
+# candidates) happened at 5.5-6.6m, just outside that tighter margin.
+OVERTAKE_ABANDONED_GOAL_MARGIN = 10.0
 
 def main(replanner: bool = False, vis_frame: bool = False, save_weight_table: bool = False, historical_plot: bool = False) -> None:
     """
@@ -98,6 +104,12 @@ def main(replanner: bool = False, vis_frame: bool = False, save_weight_table: bo
     cost, path, trajectory_full, search_runtime = run_motion_primitive_search(scenario_no_obstacles, car_dimensions,
                                                                               mps)
 
+    # Saved once, before any replan can overwrite trajectory_full: the original obstacle-free
+    # route, straight through the home lane all the way to the true goal. Used as the fallback
+    # candidate whenever a replan decides not to overtake, instead of synthesizing a new short
+    # trajectory each time (see build_fallback_from_initial_trajectory).
+    initial_trajectory_full = trajectory_full.copy()
+
     # Initialize MPC, set max speed to cyclist speed if the AV is following the cyclist
     if IS_FOLLOWING == True:
         mpc, state, dl = initialize_mpc(trajectory_full, car_dimensions, max_speed=CyclistParameters.SPEED)
@@ -117,6 +129,7 @@ def main(replanner: bool = False, vis_frame: bool = False, save_weight_table: bo
     distance_history = deque(maxlen=STABILITY_WINDOW)
     pending_replan_request = False  # Step 3: a replan that was needed but held by an active collision override
     last_replan_was_fallback = False  # Step 7 (scoped): last replan was constrained by the safety filter
+    last_replan_had_no_overtake_option = False  # last replan had zero viable overtake candidates
     last_replan_time = None           # Step 7 (scoped): sim time of the last executed replan, for the retry cooldown
 
     loop_runtimes = []
@@ -208,12 +221,30 @@ def main(replanner: bool = False, vis_frame: bool = False, save_weight_table: bo
             # has nothing left to accomplish and actively risks the degenerate single-node-path
             # case in MotionPrimitiveSearch (its is_goal() box can already be satisfied at the
             # start). Suppress both proactive triggers below in that case — the reasons-based
-            # trigger above is untouched, since a genuine safety/comfort concern still matters.
+            # trigger above is untouched here, since a genuine safety/comfort concern still
+            # matters in general (see the stronger, fallback-conditioned suppression next).
             near_true_goal = is_near_true_goal(state.x, state.y, ScenarioParameters.X_LOC_EGO, ScenarioParameters.Y_LOC_GOAL)
+
+            # Step 7 (scoped): once overtaking has already been ruled out (last replan fell
+            # back to conservative following, whether because real candidates got safety-
+            # filtered out OR because A* found none at all) AND the ego is close to the goal,
+            # there's no new maneuver left to find — postpone all further replanning, including
+            # a genuine reasons-triggered one, rather than re-running the search machinery in
+            # exactly the zone where degenerate near-goal trajectories have repeatedly crashed.
+            # Deliberately a separate flag from last_replan_was_fallback (used by the retry
+            # trigger below): broadening that one too made retry fire on every transient "A*
+            # found nothing" near the goal, not just a real blocked-overtake case, and that
+            # over-triggering destabilized the ego (verified live — it drove off the map).
+            postpone_near_goal = should_postpone_replan_near_goal(
+                last_replan_had_no_overtake_option, state.x, state.y, ScenarioParameters.X_LOC_EGO, ScenarioParameters.Y_LOC_GOAL)
+            if postpone_near_goal and replan_needed:
+                logger.info(f"t={i * ScenarioParameters.DT:.2f}s postponing replan — overtake already ruled out and close to goal")
+                replan_needed = False
+
             if i % 10 == 0:
                 logger.info(f"DEBUG_GOAL: t={i * ScenarioParameters.DT:.2f}s state=({state.x:.2f},{state.y:.2f}) "
                             f"v={state.v:.2f} dist_to_goal={math.hypot(state.x - ScenarioParameters.X_LOC_EGO, state.y - ScenarioParameters.Y_LOC_GOAL):.2f} "
-                            f"near_true_goal={near_true_goal} is_goal={mpc.is_goal(state)}")
+                            f"near_true_goal={near_true_goal} postpone_near_goal={postpone_near_goal} is_goal={mpc.is_goal(state)}")
 
             # Step 7 (scoped): reasons_evaluation's replan_tracker is edge-triggered and won't
             # re-fire while the same reason stays below threshold — which it usually does once
@@ -223,13 +254,18 @@ def main(replanner: bool = False, vis_frame: bool = False, save_weight_table: bo
             # by an oncoming car) gets re-attempted once conditions might have changed.
             time_since_last_replan = (i * ScenarioParameters.DT - last_replan_time) if last_replan_time is not None else float('inf')
             retry_needed = should_retry_after_fallback(last_replan_was_fallback, reasons_below_threshold, time_since_last_replan)
-            if retry_needed and not replan_needed and not near_true_goal:
+            if retry_needed and not replan_needed and not near_true_goal and not postpone_near_goal:
                 logger.info(f"t={i * ScenarioParameters.DT:.2f}s retrying replan — previous attempt was safety-constrained")
                 replan_needed = True
 
             # Step 7 (scoped): proactively replan before running out of the current trajectory —
             # follow_trajectory doesn't reach the real destination, and without this the AV
-            # reaches its last point and stalls with nothing left to track.
+            # reaches its last point and stalls with nothing left to track. Deliberately NOT
+            # gated on postpone_near_goal (unlike retry above): postponing exists to stop
+            # searching for a *better* overtake once one's been ruled out, but this trigger
+            # isn't about finding a better maneuver — it's the only thing keeping the ego
+            # moving at all. Suppressing it here caused exactly the stall it exists to
+            # prevent (verified live — the ego sat motionless for 15+ seconds near the goal).
             exhaustion_needed = is_trajectory_nearly_exhausted(traj_agent_idx, len(trajectory_full))
             if exhaustion_needed and not replan_needed and not near_true_goal:
                 logger.info(f"t={i * ScenarioParameters.DT:.2f}s replanning — current trajectory nearly exhausted")
@@ -243,7 +279,29 @@ def main(replanner: bool = False, vis_frame: bool = False, save_weight_table: bo
             )
 
             # Execute replan only if the gate above cleared it
-            if execute_replan:
+            if execute_replan and postpone_near_goal:
+                # Overtaking's already ruled out and we're close to the goal — skip
+                # perform_replan's full A*/safety-filter/scoring pipeline (which near the
+                # goal either finds nothing or a short pace-matching fallback via
+                # create_following_trajectory that doesn't make progress toward the goal,
+                # just re-exhausts and retriggers) and drive straight to the true goal
+                # instead. Also naturally corrects any leftover lateral offset from an
+                # aborted overtake, rather than freezing at that offset.
+                logger.info(f"t={i * ScenarioParameters.DT:.2f}s replanning — straight line to goal "
+                            f"(overtake already ruled out, close to goal)")
+                trajectory_full = build_straight_to_goal_trajectory(
+                    state.x, state.y, state.yaw, ScenarioParameters.X_LOC_EGO, ScenarioParameters.Y_LOC_GOAL)
+                traj_agent_idx = 0
+                mpc = MPC(
+                    cx=trajectory_full[:, 0], cy=trajectory_full[:, 1], cyaw=trajectory_full[:, 2],
+                    dl=dl, speed=MPCParameters.MAX_SPEED_FREEWAY, dt=ScenarioParameters.DT,
+                    car_dimensions=car_dimensions,
+                    goal=(ScenarioParameters.X_LOC_EGO, ScenarioParameters.Y_LOC_GOAL)
+                )
+                collision_xy = None
+                distance_history.clear()
+                last_replan_time = i * ScenarioParameters.DT
+            elif execute_replan:
                 # Perform replan, reset the trajectory, MPC, and collision status
                 IS_FOLLOWING = False
                 # change max_speed of the MPC to 30/3.6
@@ -254,6 +312,7 @@ def main(replanner: bool = False, vis_frame: bool = False, save_weight_table: bo
                             reasons_cyclist_values, reasons_driver_values, reasons_policymaker_values,
                             time_values,
                             max_speed=MPCParameters.MAX_SPEED_FREEWAY,
+                            initial_trajectory_full=initial_trajectory_full,
                             moving_obstacle_dimensions=moving_obstacle_dimensions,
                             is_following=IS_FOLLOWING,
                             vis_frame=vis_frame,
@@ -270,7 +329,18 @@ def main(replanner: bool = False, vis_frame: bool = False, save_weight_table: bo
 
                 # Step 7 (scoped): remember whether this outcome was safety-constrained, and when
                 # it happened, so should_retry_after_fallback can decide about the next attempt.
+                # Deliberately narrow — only real candidates that got safety-filtered out, e.g. an
+                # overtake blocked by an oncoming car — since retry fires every 2s throughout the
+                # whole run, not just near the goal, and broadening this to also cover "A* found
+                # nothing" made retry over-trigger on transient search misses far from the goal.
                 last_replan_was_fallback = bool(scenario.trajectory_evaluation.get('safety_filter_excluded', False))
+
+                # Broader signal for should_postpone_replan_near_goal only: overtaking was ruled
+                # out for any reason, including A* finding no candidates at all (common near the
+                # goal, where the search space collapses) — safe to use here since this trigger
+                # only applies within OVERTAKE_ABANDONED_GOAL_MARGIN of the true goal anyway.
+                last_replan_had_no_overtake_option = last_replan_was_fallback \
+                    or bool(scenario.trajectory_evaluation.get('no_astar_candidates', False))
                 last_replan_time = i * ScenarioParameters.DT
 
         # Cut off the trajectory before a collision occurs, with an additional margin
@@ -300,7 +370,7 @@ def main(replanner: bool = False, vis_frame: bool = False, save_weight_table: bo
                             reasons_cyclist_values, reasons_driver_values, reasons_policymaker_values, distance_values,
                             reasons_cyclist_comfort, reasons_driver_time_eff, reasons_policymaker_reg_compliance,
                             speed_values, time_values, xref_deviation_values, xref_deviation_value,
-                            static_x_axis=True, max_time=15, historical_plot=historical_plot) # static_x_axis=False)
+                            static_x_axis=False, max_time=15, historical_plot=historical_plot)
 
 
         # Move all obstacles one step ahead
@@ -556,6 +626,41 @@ def is_near_true_goal(ego_x, ego_y, goal_x, goal_y, margin=GOAL_PROXIMITY_SUPPRE
     return math.hypot(ego_x - goal_x, ego_y - goal_y) <= margin
 
 
+def should_postpone_replan_near_goal(last_replan_had_no_overtake_option, ego_x, ego_y, goal_x, goal_y,
+                                     margin=OVERTAKE_ABANDONED_GOAL_MARGIN):
+    """
+    True once overtaking has already been ruled out — the last replan had no viable
+    overtake option, whether because real candidates got safety-filtered out or because
+    A* found none at all — and the ego is within `margin` of the true goal. At that point
+    there's no new maneuver left to find — the overtake window is effectively closed — so
+    postpone all further trajectory generation (including a genuine reasons-triggered
+    replan) rather than re-running the search machinery in exactly the zone where
+    degenerate near-goal trajectories have repeatedly surfaced.
+    """
+    if not last_replan_had_no_overtake_option:
+        return False
+    return is_near_true_goal(ego_x, ego_y, goal_x, goal_y, margin=margin)
+
+
+def build_straight_to_goal_trajectory(ego_x, ego_y, ego_yaw, goal_x, goal_y, ds=0.5):
+    """
+    A direct straight-line path from the ego's current position to the true goal. Used
+    once should_postpone_replan_near_goal is true — at that point there's no maneuver
+    left to search for, and repeatedly running perform_replan's full A*/safety-filter
+    pipeline for a result that just paces near the ego's current position
+    (create_following_trajectory's template-based fallback, built to match pace with
+    the cyclist mid-route) doesn't make progress toward the goal. This also naturally
+    steers back toward goal_x if the ego is currently offset from it (e.g. mid-lane-
+    change when the overtake got aborted), rather than freezing at that offset.
+    """
+    remaining_distance = max(math.hypot(goal_x - ego_x, goal_y - ego_y), ds * 2)
+    num_points = int(remaining_distance / ds) + 1
+    xs = np.linspace(ego_x, goal_x, num_points)
+    ys = np.linspace(ego_y, goal_y, num_points)
+    thetas = np.full(num_points, ego_yaw)
+    return np.column_stack([xs, ys, thetas])
+
+
 def compute_predicted_trajectory(state, trajectory_res, last_index=None):
     """
     Compute the predicted trajectory for the car based on its current speed and maximum acceleration.
@@ -606,7 +711,7 @@ def perform_replan(arterial, car_dimensions, bicycle_dimensions, dl, moving_obst
                    trajs_moving_obstacles, scenario_visualization,
                    reasons_cyclist_comfort, reasons_driver_time_eff, reasons_policymaker_reg_compliance,
                    reasons_cyclist_values, reasons_driver_values, reasons_policymaker_values,
-                   time_values, max_speed, moving_obstacle_dimensions=None,
+                   time_values, max_speed, initial_trajectory_full, moving_obstacle_dimensions=None,
                    is_following=True, vis_frame=False, save_weight_table=False, time_elapsed_driver=0.0, time_passed_cyclist=0.0):
     """
     Perform a replan based on the current state and moving obstacles.
@@ -658,8 +763,15 @@ def perform_replan(arterial, car_dimensions, bicycle_dimensions, dl, moving_obst
     # Calculate all trajectories
     costs, paths, trajectories_full = search.run_all(debug=True)
 
-    # Create a new trajectory for the ego vehicle to follow the cyclist
-    follow_trajectory = create_following_trajectory(state, trajectories_full)
+    # A* found no overtake candidates at all (common near the goal, where the search space
+    # collapses) — as much a "no viable overtake" outcome as the safety filter excluding
+    # real candidates below, just via a different code path. Tracked separately from
+    # safety_filter_excluded since that flag only fires when there was something to exclude.
+    no_astar_candidates = len(trajectories_full) == 0
+
+    # Fallback candidate when overtaking isn't (or turns out not to be) viable: a slice
+    # of the original obstacle-free route, not a freshly synthesized trajectory.
+    follow_trajectory = build_fallback_from_initial_trajectory(state, initial_trajectory_full)
 
     # Add the trajectory to the list of trajectories to the last position
     trajectories_full.append((follow_trajectory,(0.0, 0.0, 0.0, 0.0, 0.0)))
@@ -734,62 +846,28 @@ def perform_replan(arterial, car_dimensions, bicycle_dimensions, dl, moving_obst
     collision_xy = None  # Reset collision tracker
 
     # Store evaluation data for later analysis if needed
+    eval_results['no_astar_candidates'] = no_astar_candidates
     scenario_obstacles.trajectory_evaluation = eval_results
 
     return collision_xy, mpc, traj_agent_idx, trajectory_full, scenario_obstacles
 
 
-def create_following_trajectory(state, trajectories_full, fallback_ds=0.5):
-    if trajectories_full:
-        template_trajectory = trajectories_full[0][0]
-    else:
-        # No successful A* trajectory exists — build a straight-ahead fallback
-        # that ends at the ACTUAL scenario goal, not an arbitrary fixed distance.
-        print("create_following_trajectory: no candidate trajectories available, using goal-anchored straight-line fallback")
-        goal_x = ScenarioParameters.X_LOC_GOAL
-        goal_y = ScenarioParameters.Y_LOC_GOAL
-        remaining_distance = max(goal_y - state.y, fallback_ds * 2)  # ensure at least 2 points
-        num_points = int(remaining_distance / fallback_ds) + 1
-
-        # Straight line from current position toward the goal's x, ending at goal's y
-        xs = np.linspace(state.x, goal_x, num_points)
-        ys = state.y + np.arange(num_points) * fallback_ds
-        thetas = np.full(num_points, state.yaw)
-        template_trajectory = np.column_stack([xs, ys, thetas])
-
-    resampled_trajectory = compute_predicted_trajectory(state, template_trajectory)
-    completion_time = calculate_trajectory_completion_time(resampled_trajectory, state)
-    # Get initial values
-    init_x = resampled_trajectory[0, 0]  # Initial x value
-    init_y = resampled_trajectory[0, 1]  # Initial y value
-    init_theta = resampled_trajectory[0, 2]  # Initial theta value
-    original_length = len(resampled_trajectory)
-    # Create a copy of the trajectory to modify
-    follow_trajectory = resampled_trajectory.copy()
-    # Create an array of y-positions with proper length
-    new_y_values = np.arange(
-        init_y,
-        init_y + (completion_time * state.v),
-        (state.v * ScenarioParameters.DT)
-    )
-    # Ensure the array has the correct length
-    if len(new_y_values) != original_length:
-        # If too short, extend the array by repeating the last value
-        if len(new_y_values) < original_length:
-            new_y_values = np.append(
-                new_y_values,
-                np.repeat(new_y_values[-1], original_length - len(new_y_values))
-            )
-        # If too long, truncate the array
-        else:
-            new_y_values = new_y_values[:original_length]
-    # Now assign the correctly sized array for y-coordinate (column 1)
-    follow_trajectory[:, 1] = new_y_values
-    # Keep x-coordinate (column 0) constant at the initial value
-    follow_trajectory[:, 0] = init_x
-    # Keep orientation (column 2) constant at the initial value
-    follow_trajectory[:, 2] = init_theta
-    return follow_trajectory
+def build_fallback_from_initial_trajectory(state, initial_trajectory_full):
+    """
+    The fallback candidate used whenever a replan decides not to overtake. Rather than
+    synthesizing a new trajectory around wherever the ego currently is (the old
+    create_following_trajectory approach — pacing at a fixed x that could be mid-lane-
+    change, and short enough to need constant regeneration), reuse a slice of the
+    ORIGINAL obstacle-free route computed once at the very start of the simulation. It
+    already runs straight down the home lane all the way to the true goal. The existing
+    reactive collision-avoidance cutoff (cutoff_trajectory_before_collision, applied
+    every frame regardless of which trajectory is loaded) is what actually keeps the ego
+    safely behind the cyclist — this fallback just needs to give it somewhere real to go.
+    """
+    nearest_idx = calc_nearest_index_in_direction(
+        state, initial_trajectory_full[:, 0], initial_trajectory_full[:, 1],
+        start_index=0, forward=True)
+    return initial_trajectory_full[nearest_idx:].copy()
 
 
 def visualize_trajectory_evaluations(eval_results, trajectories_full, moving_obstacles, state, car_dimensions,
@@ -1046,8 +1124,10 @@ def visualize_trajectory_evaluations(eval_results, trajectories_full, moving_obs
         trajectories_save_path = save_path.replace('.png', '_trajectories.png')
         plt.savefig(trajectories_save_path, dpi=400, bbox_inches='tight')
 
-    # Show the trajectory plots
-    plt.show()
+    # Already saved to disk above — close rather than show, since this runs once per
+    # executed replan (often several times per run) and plt.show() blocks the simulation
+    # loop until each window is manually closed.
+    plt.close(fig_trajectories)
 
     # SECOND OUTPUT: Create spatial plot with fixed dimensions
     # Use a wider, larger figure
@@ -1144,8 +1224,9 @@ def visualize_trajectory_evaluations(eval_results, trajectories_full, moving_obs
         spatial_save_path = save_path.replace('.png', '_spatial.png')
         plt.savefig(spatial_save_path, dpi=600, bbox_inches='tight', pad_inches=0.5)
 
-    # Show the spatial plot
-    plt.show()
+    # Already saved to disk above — close rather than show, for the same reason as the
+    # trajectory plot above.
+    plt.close(fig_spatial)
 
     return fig_trajectories, fig_spatial
 
@@ -1649,98 +1730,115 @@ def evaluate_trajectories_for_reasons(trajectories_full, moving_obstacles, state
             resampled_trajectory = compute_predicted_trajectory(state, trajectory[0])
             completion_time = calculate_trajectory_completion_time(resampled_trajectory, state)
 
-        # 2. Predict bicycle movement for this duration
-        bicycle_future_trajectory = np.vstack(MovingObstaclesPrediction(
-            *moving_obstacles[0].get(),
-            sample_time=ScenarioParameters.DT,
-            car_dimensions=bicycle_dimensions
-        ).state_prediction(completion_time)).T
+        if len(resampled_trajectory) <= 1 or not (completion_time > 0) or not np.isfinite(completion_time):
+            # Degenerate candidate: nothing to travel (completion_time is 0 by
+            # calculate_trajectory_completion_time's own definition whenever this
+            # happens), so there's no time horizon to predict the cyclist over and
+            # nothing to sample along. This showed up in practice for the implicit
+            # follow_trajectory candidate resampled at near-zero ego speed, which
+            # otherwise crashed on an empty bicycle_future_trajectory array. Score it
+            # using the reasons as they stand right now instead.
+            policymaker_scores = [reasons_policymaker_reg_compliance]
+            driver_scores = [reasons_driver_time_eff]
+            cyclist_comfort_scores = [reasons_cyclist_comfort]
+            cyclist_time_scores = [reasons_cyclist_comfort]
+            cyclist_combined_scores = [reasons_cyclist_comfort]
+            avg_policymaker = reasons_policymaker_reg_compliance
+            avg_driver = reasons_driver_time_eff
+            avg_cyclist = reasons_cyclist_comfort
+        else:
+            # 2. Predict bicycle movement for this duration
+            bicycle_future_trajectory = np.vstack(MovingObstaclesPrediction(
+                *moving_obstacles[0].get(),
+                sample_time=ScenarioParameters.DT,
+                car_dimensions=bicycle_dimensions
+            ).state_prediction(completion_time)).T
 
-        # 3. Sample points along both trajectories
-        num_sample_points = len(resampled_trajectory)
+            # 3. Sample points along both trajectories
+            num_sample_points = len(resampled_trajectory)
 
-        # Create evenly spaced indices
-        ego_indices = np.linspace(0, len(resampled_trajectory) - 1, num_sample_points, dtype=int)
-        # Delete the last point of bicycle_future_trajectory
-        bicycle_indices = np.linspace(0, len(bicycle_future_trajectory[:-1]) - 1, num_sample_points, dtype=int)
+            # Create evenly spaced indices
+            ego_indices = np.linspace(0, len(resampled_trajectory) - 1, num_sample_points, dtype=int)
+            # Delete the last point of bicycle_future_trajectory
+            bicycle_indices = np.linspace(0, len(bicycle_future_trajectory[:-1]) - 1, num_sample_points, dtype=int)
 
-        # 4. Evaluate reasons at each sample point
-        current_time_elapsed_driver = time_elapsed_driver
-        current_time_passed_cyclist = time_passed_cyclist
+            # 4. Evaluate reasons at each sample point
+            current_time_elapsed_driver = time_elapsed_driver
+            current_time_passed_cyclist = time_passed_cyclist
 
-        policymaker_scores = []
-        driver_scores = []
-        cyclist_comfort_scores = []
-        cyclist_time_scores = []
-        cyclist_combined_scores = []
+            policymaker_scores = []
+            driver_scores = []
+            cyclist_comfort_scores = []
+            cyclist_time_scores = []
+            cyclist_combined_scores = []
 
-        # Width of the car for centerline evaluation
-        car_width = car_dimensions.bounding_box_size[0]
+            # Width of the car for centerline evaluation
+            car_width = car_dimensions.bounding_box_size[0]
 
-        for j in range(num_sample_points):
-            # Get ego vehicle state at this point
-            ego_x = resampled_trajectory[ego_indices[j], 0]
-            ego_y = resampled_trajectory[ego_indices[j], 1]
-            ego_theta = resampled_trajectory[ego_indices[j], 2]
+            for j in range(num_sample_points):
+                # Get ego vehicle state at this point
+                ego_x = resampled_trajectory[ego_indices[j], 0]
+                ego_y = resampled_trajectory[ego_indices[j], 1]
+                ego_theta = resampled_trajectory[ego_indices[j], 2]
 
-            # Get bicycle state at this point
-            bicycle_x = bicycle_future_trajectory[bicycle_indices[j], 0]
-            bicycle_y = bicycle_future_trajectory[bicycle_indices[j], 1]
+                # Get bicycle state at this point
+                bicycle_x = bicycle_future_trajectory[bicycle_indices[j], 0]
+                bicycle_y = bicycle_future_trajectory[bicycle_indices[j], 1]
 
-            # Create a simulated state object for evaluation
-            simulated_state = State(x=ego_x, y=ego_y, yaw=ego_theta, v=state.v)
+                # Create a simulated state object for evaluation
+                simulated_state = State(x=ego_x, y=ego_y, yaw=ego_theta, v=state.v)
 
-            # Create a simulated obstacle object for evaluation
-            simulated_obstacle = type('obj', (object,), {
-                'get': lambda self=None: (bicycle_x, bicycle_y, 0, 0, CyclistParameters.SPEED, 0)
-            })
-            simulated_obstacles = [simulated_obstacle]
+                # Create a simulated obstacle object for evaluation
+                simulated_obstacle = type('obj', (object,), {
+                    'get': lambda self=None: (bicycle_x, bicycle_y, 0, 0, CyclistParameters.SPEED, 0)
+                })
+                simulated_obstacles = [simulated_obstacle]
 
-            # Evaluate policymaker (regulatory compliance)
-            policymaker_score = evaluate_distance_to_centerline(
-                ego_x, car_width, ScenarioParameters.CENTERLINE_LOCATION)
-            policymaker_scores.append(policymaker_score)
+                # Evaluate policymaker (regulatory compliance)
+                policymaker_score = evaluate_distance_to_centerline(
+                    ego_x, car_width, ScenarioParameters.CENTERLINE_LOCATION)
+                policymaker_scores.append(policymaker_score)
 
-            # Evaluate driver time efficiency
-            driver_score, current_time_elapsed_driver = evaluate_time_following(
-                'driver_reasons', ScenarioParameters.DT,
-                DriverParameters.DISTANCE_BUFFER, DriverParameters.DISTANCE_REF,
-                DriverParameters.TIME_THRESHOLD, simulated_obstacles,
-                simulated_state, current_time_elapsed_driver)
-            driver_scores.append(driver_score)
+                # Evaluate driver time efficiency
+                driver_score, current_time_elapsed_driver = evaluate_time_following(
+                    'driver_reasons', ScenarioParameters.DT,
+                    DriverParameters.DISTANCE_BUFFER, DriverParameters.DISTANCE_REF,
+                    DriverParameters.TIME_THRESHOLD, simulated_obstacles,
+                    simulated_state, current_time_elapsed_driver)
+                driver_scores.append(driver_score)
 
-            # Evaluate cyclist comfort (distance)
-            cyclist_comfort_score = evaluate_distance_to_obstacle(
-                CyclistParameters.DISTANCE_BUFFER, CyclistParameters.DISTANCE_REF,
-                simulated_obstacles, simulated_state)
-            cyclist_comfort_scores.append(cyclist_comfort_score)
+                # Evaluate cyclist comfort (distance)
+                cyclist_comfort_score = evaluate_distance_to_obstacle(
+                    CyclistParameters.DISTANCE_BUFFER, CyclistParameters.DISTANCE_REF,
+                    simulated_obstacles, simulated_state)
+                cyclist_comfort_scores.append(cyclist_comfort_score)
 
-            # Evaluate cyclist comfort (time)
-            cyclist_time_score, current_time_passed_cyclist = evaluate_time_following(
-                'cyclist_reasons', ScenarioParameters.DT,
-                CyclistParameters.DISTANCE_BUFFER, CyclistParameters.DISTANCE_REF,
-                CyclistParameters.TIME_THRESHOLD, simulated_obstacles,
-                simulated_state, current_time_passed_cyclist)
-            cyclist_time_scores.append(cyclist_time_score)
+                # Evaluate cyclist comfort (time)
+                cyclist_time_score, current_time_passed_cyclist = evaluate_time_following(
+                    'cyclist_reasons', ScenarioParameters.DT,
+                    CyclistParameters.DISTANCE_BUFFER, CyclistParameters.DISTANCE_REF,
+                    CyclistParameters.TIME_THRESHOLD, simulated_obstacles,
+                    simulated_state, current_time_passed_cyclist)
+                cyclist_time_scores.append(cyclist_time_score)
 
-            # Combined cyclist score
-            cyclist_combined_score = cyclist_comfort_score * cyclist_time_score
-            cyclist_combined_scores.append(cyclist_combined_score)
+                # Combined cyclist score
+                cyclist_combined_score = cyclist_comfort_score * cyclist_time_score
+                cyclist_combined_scores.append(cyclist_combined_score)
 
-        #delete last value of scores because the ego vehicle is not moving but the bicycle is
-        policymaker_scores = policymaker_scores[:-1]
-        driver_scores = driver_scores[:-1]
-        cyclist_combined_scores = cyclist_combined_scores[:-1]
+            #delete last value of scores because the ego vehicle is not moving but the bicycle is
+            policymaker_scores = policymaker_scores[:-1]
+            driver_scores = driver_scores[:-1]
+            cyclist_combined_scores = cyclist_combined_scores[:-1]
 
-        #replace first value of reasons scores with the first value of reasons evaluation
-        policymaker_scores[0] = reasons_policymaker_reg_compliance
-        driver_scores[0] = reasons_driver_time_eff
-        cyclist_combined_scores[0] = reasons_cyclist_comfort
+            #replace first value of reasons scores with the first value of reasons evaluation
+            policymaker_scores[0] = reasons_policymaker_reg_compliance
+            driver_scores[0] = reasons_driver_time_eff
+            cyclist_combined_scores[0] = reasons_cyclist_comfort
 
-        # 5. Calculate average scores for each reason
-        avg_policymaker = np.mean(policymaker_scores[:-1])
-        avg_driver = np.mean(driver_scores)
-        avg_cyclist = np.mean(cyclist_combined_scores)
+            # 5. Calculate average scores for each reason
+            avg_policymaker = np.mean(policymaker_scores[:-1])
+            avg_driver = np.mean(driver_scores)
+            avg_cyclist = np.mean(cyclist_combined_scores)
 
         # 6. Calculate weighted total score
         # Define weights for different agents (matching your existing weights)
@@ -2277,6 +2375,15 @@ def calculate_trajectory_completion_time(trajectory_res, state, last_index=None)
 
     # Calculate distance between consecutive points
     if len(trajectory_res) <= 1:
+        return 0.0
+
+    # In fixed-speed mode (last_index is not None), current_velocity is never updated
+    # below, so a non-positive state.v (the ego near-stopped or briefly reversing, which
+    # happens around deceleration near the goal) would divide every segment_time by zero
+    # or a negative number, producing inf/negative total_time instead of a real duration.
+    # There's no time-to-complete at a standstill (or in reverse) — treat it the same as
+    # a trajectory with nothing left to travel.
+    if last_index is not None and current_velocity <= 0:
         return 0.0
 
     distances = []
@@ -3026,7 +3133,7 @@ if __name__ == '__main__':
     # Currently, the program will produce .txt file (stakeholder_weight_analysis_formatted.txt), which should be copy paste to:
     # /Users/lsuryana/Library/CloudStorage/GoogleDrive-lucaselbert@gmail.com/My Drive/PhD/Publication/IAVVC_2025
     # Then run analysis.ipynb last slide
-    main(replanner=True, vis_frame=True, save_weight_table=False, historical_plot=False)
+    main(replanner=False, vis_frame=True, save_weight_table=False, historical_plot=False)
     # Replanner = True mean we will replan if any reason is below the threshold
     # vis_frame = True means we will visualize each frame and save it to ../results/reasons_evaluation
     # save_weight_table = True means we will save the weight analysis table to ../results/reasons_evaluation/stakeholder_weight_analysis_formatted.txt

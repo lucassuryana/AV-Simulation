@@ -4,6 +4,7 @@ from scenarios.overtaking_cyclist_bidirectional_road import (
     should_retry_after_fallback,
     is_trajectory_nearly_exhausted,
     is_near_true_goal,
+    should_postpone_replan_near_goal,
 )
 
 
@@ -79,6 +80,39 @@ class IsNearTrueGoalTestCase(unittest.TestCase):
 
     def test_true_just_inside_margin(self):
         self.assertTrue(is_near_true_goal(2.0, 26.9, 2.0, 22.0, margin=5.0))
+
+
+class ShouldPostponeReplanNearGoalTestCase(unittest.TestCase):
+
+    def test_false_when_last_replan_was_not_a_fallback(self):
+        # Overtaking hasn't been ruled out -- a real maneuver might still be findable,
+        # so don't postpone even though the ego is right at the goal.
+        self.assertFalse(should_postpone_replan_near_goal(
+            last_replan_had_no_overtake_option=False, ego_x=2.0, ego_y=22.0, goal_x=2.0, goal_y=22.0, margin=10.0
+        ))
+
+    def test_false_when_far_from_goal_even_if_fallback(self):
+        self.assertFalse(should_postpone_replan_near_goal(
+            last_replan_had_no_overtake_option=True, ego_x=2.0, ego_y=0.0, goal_x=2.0, goal_y=22.0, margin=10.0
+        ))
+
+    def test_true_when_fallback_and_within_margin(self):
+        # Matches the real crash scenario: ~5.5m from goal, well within the wider
+        # OVERTAKE_ABANDONED_GOAL_MARGIN even though it's outside the tighter
+        # GOAL_PROXIMITY_SUPPRESS_REPLAN margin used by is_near_true_goal elsewhere.
+        self.assertTrue(should_postpone_replan_near_goal(
+            last_replan_had_no_overtake_option=True, ego_x=1.99, ego_y=16.53, goal_x=2.0, goal_y=22.0, margin=10.0
+        ))
+
+    def test_false_just_outside_margin(self):
+        self.assertFalse(should_postpone_replan_near_goal(
+            last_replan_had_no_overtake_option=True, ego_x=2.0, ego_y=11.9, goal_x=2.0, goal_y=22.0, margin=10.0
+        ))
+
+    def test_true_just_inside_margin(self):
+        self.assertTrue(should_postpone_replan_near_goal(
+            last_replan_had_no_overtake_option=True, ego_x=2.0, ego_y=12.1, goal_x=2.0, goal_y=22.0, margin=10.0
+        ))
 
 
 if __name__ == '__main__':
